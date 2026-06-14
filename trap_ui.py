@@ -60,22 +60,22 @@ div[data-testid="stDataFrame"] { border: 1px solid #DDE1E7; border-radius: 6px; 
 </style>
 """, unsafe_allow_html=True)
 
-# ── token ─────────────────────────────────────────────────────────────────────
-try:
-    TOKEN = st.secrets.get("UPSTOX_TOKEN", "") or ""
-except Exception:
-    TOKEN = ""
+# ── token — sidebar input wins, then secrets.toml, then session state ──────────
+# Token is resolved at render time so sidebar input takes effect immediately.
+def _get_token() -> str:
+    # 1. sidebar live input (stored in session state after user submits)
+    if st.session_state.get("live_token"):
+        return st.session_state["live_token"]
+    # 2. secrets.toml
+    try:
+        t = st.secrets.get("UPSTOX_TOKEN", "") or ""
+        if t:
+            return t
+    except Exception:
+        pass
+    return ""
 
-if not TOKEN:
-    TOKEN = (
-        "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ"
-        ".eyJzdWIiOiI0SkNIRDciLCJqdGkiOiI2YTJkNzdjZjU3MmUyNTUzMjYwMDNjOD"
-        "QiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0Ij"
-        "oxNzgxMzY0Njg3LCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOj"
-        "E3ODEzODgwMDB9.m7y4u0urqwF2SYUY-i4bg5r6TJarFYa7uyG7_rlsoJI"
-    )
-
-HEADERS = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/json"}
+HEADERS: dict = {}   # populated after sidebar renders
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -797,6 +797,31 @@ def render_daily_scanner(weeks: int, filter_who: list, filter_status: list, cont
 with st.sidebar:
     st.markdown("## Nifty Trap Scanner")
     st.markdown("---")
+
+    # ── Token input ────────────────────────────────────────────────────────────
+    st.markdown("**Upstox API Token**")
+    token_input = st.text_input(
+        "Paste today's token",
+        value=st.session_state.get("live_token", ""),
+        type="password",
+        placeholder="eyJ0eX...",
+        label_visibility="collapsed",
+    )
+    if st.button("Set Token", use_container_width=True):
+        if token_input.strip():
+            st.session_state["live_token"] = token_input.strip()
+            st.cache_data.clear()
+            st.success("Token saved — data cache cleared.")
+        else:
+            st.error("Paste a valid token first.")
+
+    current_token = _get_token()
+    if current_token:
+        st.caption(f"Token: `...{current_token[-12:]}`  ✓ set")
+    else:
+        st.warning("No token set — API calls will fail.")
+
+    st.markdown("---")
     active_tab = st.radio("View", ["Option 75-min Traps", "Daily Nifty Traps (52w)"],
                           index=0)
     st.markdown("---")
@@ -818,7 +843,7 @@ with st.sidebar:
         chart_ctx     = st.slider("Chart context (daily bars)", 10, 60, 30)
 
     st.markdown("---")
-    if st.button("Refresh Data", use_container_width=True):
+    if st.button("🔄 Refresh / Fetch Data", use_container_width=True, type="primary"):
         st.cache_data.clear()
         st.rerun()
 
@@ -832,6 +857,10 @@ SL = trapped side's original entry
 OPEN = not yet returned to entry
 CLOSED = 0-loss exit happened
 """)
+
+# ── wire HEADERS now that sidebar has resolved the token ──────────────────────
+HEADERS["Authorization"] = f"Bearer {_get_token()}"
+HEADERS["Accept"] = "application/json"
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  RENDER
