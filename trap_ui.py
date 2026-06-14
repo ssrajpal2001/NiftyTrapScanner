@@ -133,23 +133,40 @@ def sec(text: str):
 
 @st.cache_data(ttl=300)
 def fetch_spot_prev_day() -> dict:
-    today    = datetime.today().strftime("%Y-%m-%d")
-    week_ago = (datetime.today() - timedelta(days=7)).strftime("%Y-%m-%d")
+    """
+    Returns the last COMPLETED trading day's OHLC.
+    Strategy: fetch 10 days of daily data, then pick the most recent candle
+    whose date is strictly BEFORE today. This handles:
+      - Today is a trading day (market open or not yet open)
+      - Today is a weekend / holiday (API has no candle for today)
+    """
+    today_str = datetime.today().strftime("%Y-%m-%d")
+    from_str  = (datetime.today() - timedelta(days=14)).strftime("%Y-%m-%d")
     url = (f"https://api.upstox.com/v2/historical-candle/"
-           f"NSE_INDEX%7CNifty%2050/day/{today}/{week_ago}")
+           f"NSE_INDEX%7CNifty%2050/day/{today_str}/{from_str}")
     r = requests.get(url, headers=HEADERS, timeout=15)
     body = r.json()
     if body.get("status") != "success":
         st.error(f"Spot API error: {body}")
         st.stop()
+    # candles come descending from API; reversed → ascending
     candles = list(reversed(body["data"]["candles"]))
-    row = candles[-2] if len(candles) >= 2 else candles[-1]
+    # pick the last candle whose date < today
+    today_date = datetime.today().date()
+    prev_row = None
+    for c in reversed(candles):
+        candle_date = datetime.strptime(c[0][:10], "%Y-%m-%d").date()
+        if candle_date < today_date:
+            prev_row = c
+            break
+    if prev_row is None:
+        prev_row = candles[-1]   # fallback: use last available
     return {
-        "date" : row[0][:10],
-        "open" : round(row[1], 2),
-        "high" : round(row[2], 2),
-        "low"  : round(row[3], 2),
-        "close": round(row[4], 2),
+        "date" : prev_row[0][:10],
+        "open" : round(prev_row[1], 2),
+        "high" : round(prev_row[2], 2),
+        "low"  : round(prev_row[3], 2),
+        "close": round(prev_row[4], 2),
     }
 
 
