@@ -91,8 +91,8 @@ HEADERS: dict = {}   # populated after sidebar renders
 #  SHARED HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def round50(v: float) -> int:
-    return int(round(v / 50) * 50)
+def round_n(v: float, step: int) -> int:
+    return int(round(v / step) * step)
 
 def next_tuesday(ref: date) -> date:
     days = (1 - ref.weekday()) % 7
@@ -209,7 +209,7 @@ def fetch_1min(instrument_key: str, from_date: str, to_date: str):
     return df[["open","high","low","close","vol"]], None
 
 
-def resample_75min(df_1min: pd.DataFrame) -> pd.DataFrame:
+def resample_tf(df_1min: pd.DataFrame, minutes: int) -> pd.DataFrame:
     if df_1min.empty:
         return pd.DataFrame()
     bars = []
@@ -219,7 +219,7 @@ def resample_75min(df_1min: pd.DataFrame) -> pd.DataFrame:
             continue
         tz     = d.index.tz
         origin = pd.Timestamp(f"{day} 09:15:00", tz=tz)
-        r75 = d.resample("75min", origin=origin).agg(
+        r75 = d.resample(f"{minutes}min", origin=origin).agg(
             open  =("open",  "first"),
             high  =("high",  "max"),
             low   =("low",   "min"),
@@ -363,185 +363,198 @@ def build_75min_chart(df75: pd.DataFrame, trap_row: dict, context_bars: int = 10
     return fig
 
 
-def render_option_scanner(itm_offset: int, weeks_back: int, chart_context: int):
-    sec("STEP 1–2 : Prev-Day Nifty Spot  →  Pivot  →  Round to ×50")
+def _scan_one_contract(label, strike, opt_type, cls, expiry, expiry_api,
+                       from_date, to_date, tf_minutes, chart_context):
+    """Fetch, resample, scan and render results for one option contract."""
+    sym = trading_symbol(strike, opt_type, expiry)
+
+    with st.spinner(f"Looking up instrument key for {sym}..."):
+        key, err = get_instrument_key(strike, opt_type, expiry_api)
+
+    if err or not key:
+        key = option_key_upstox(strike, opt_type, expiry)
+        key_status = f"⚠️ Constructed (chain lookup failed)"
+    else:
+        key_status = f"✓ From option chain"
+
+    c1, c2, c3 = st.columns(3)
+    card(c1, "Trading Symbol", sym,                          cls)
+    card(c2, "Instrument Key", key,                          "blue")
+    card(c3, "Key Status",     key_status,                   "")
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    with st.spinner(f"Fetching 1-min data for {sym}..."):
+        df1min, err = fetch_1min(key, from_date, to_date)
+
+    if err:
+        st.error(f"1-min fetch failed: {err}")
+        return
+    if df1min is None or df1min.empty:
+        st.warning(f"No 1-min data for `{sym}` — contract may not be active yet.")
+        return
+
+    # resample to chosen timeframe
+    df_tf = resample_tf(df1min, tf_minutes)
+    if df_tf.empty:
+        st.warning(f"Resample to {tf_minutes}-min produced no bars.")
+        return
+
+    st.caption(f"{len(df1min):,} 1-min bars  →  {len(df_tf)} bars of {tf_minutes}-min")
+
+    df_events, all_entries = scan_75min(df_tf)   # scan_75min works on any timeframe
+    total      = len(df_events)
+    closed     = int((df_events["Status"] == "CLOSED").sum()) if total else 0
+    open_      = total - closed
+    open_traps = [e for e in all_entries if e["status"] == "TRAPPED"]
+
+    m1, m2, m3 = st.columns(3)
+    card(m1, "Bears Trapped",   str(total),  "blue")
+    card(m2, "Closed (0-loss)", str(closed), "green")
+    card(m3, "Still Open",      str(open_),  "orange")
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    if not df_events.empty:
+        disp = df_events.copy()
+        for col in ["Trap Bar", "Ref Bar", "Close Bar"]:
+            disp[col] = disp[col].apply(
+                lambda x: x.strftime("%d %b %y %H:%M") if pd.notna(x) else "-")
+        disp["Entry Level"] = disp["Entry Level"].map("{:.2f}".format)
+        disp["SL Level"]    = disp["SL Level"].map("{:.2f}".format)
+
+        def sc(val):
+            if val == "OPEN":   return "color:#E65100;font-weight:bold;"
+            if val == "CLOSED": return "color:#6B7280;"
+            return ""
+
+        st.dataframe(disp.style.map(sc, subset=["Status"]),
+                     use_container_width=True, height=280, hide_index=True)
+
+        # chart drilldown
+        df_r = df_events.reset_index(drop=True)
+        drop_labels = [
+            f"{row['Trap Bar'].strftime('%d %b %y %H:%M')}  |  BEARS TRAPPED  "
+            f"|  Entry {row['Entry Level']:.2f}  SL {row['SL Level']:.2f}  |  {row['Status']}"
+            for _, row in df_r.iterrows()
+        ]
+        sel_label = st.selectbox("Select trap to chart", drop_labels,
+                                 key=f"sel_{sym}", index=0)
+        sel_trap  = df_r.iloc[drop_labels.index(sel_label)].to_dict()
+
+        if st.button(f"Show Chart — {sym}", type="primary", key=f"btn_{sym}"):
+            fig = build_75min_chart(df_tf, sel_trap, context_bars=chart_context)
+            st.plotly_chart(fig, use_container_width=True)
+            status = sel_trap["Status"]
+            s_col  = "#E65100" if status == "OPEN" else "#6B7280"
+            st.markdown(f"""
+<div style="background:#F5F7FA;border:1px solid #DDE1E7;border-radius:8px;
+            padding:14px 22px;margin-top:10px;display:flex;gap:36px;flex-wrap:wrap;">
+  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Contract</div>
+       <div style="color:#1565C0;font-size:18px;font-weight:bold;">{sym}</div></div>
+  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Who Trapped</div>
+       <div style="color:#1B5E20;font-size:18px;font-weight:bold;">BEARS</div></div>
+  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Signal</div>
+       <div style="color:#1B5E20;font-size:18px;font-weight:bold;">BULLISH (BUY)</div></div>
+  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Your Entry</div>
+       <div style="color:#1565C0;font-size:18px;font-weight:bold;">{sel_trap['SL Level']:.2f}</div></div>
+  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Your SL</div>
+       <div style="color:#B71C1C;font-size:18px;font-weight:bold;">{sel_trap['Entry Level']:.2f}</div></div>
+  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Status</div>
+       <div style="color:{s_col};font-size:18px;font-weight:bold;">{status}</div></div>
+</div>""", unsafe_allow_html=True)
+    else:
+        st.info(f"No bearish traps detected for {sym} in this window.")
+
+    if open_traps:
+        st.markdown("**Open traps — market NOT returned to entry yet:**")
+        rows = [{"Trapped On"  : e["trapped_on"].strftime("%d %b %y %H:%M"),
+                 "Entry Level" : f"{e['entry']:.2f}",
+                 "SL Level"    : f"{e['sl']:.2f}"}
+                for e in sorted(open_traps, key=lambda x: x["trapped_on"])]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                     height=180, hide_index=True)
+
+    with st.expander(f"Raw {tf_minutes}-min bars — {sym}"):
+        rc = df_tf.copy()
+        rc["datetime"] = rc["datetime"].dt.strftime("%d %b %y %H:%M")
+        rc["type"] = rc.apply(lambda r: "BULL" if r["close"] > r["open"] else "BEAR", axis=1)
+        def ct(v):
+            return "color:#1B5E20;font-weight:bold;" if v=="BULL" else "color:#B71C1C;font-weight:bold;"
+        st.dataframe(rc.style.map(ct, subset=["type"]),
+                     use_container_width=True, height=350, hide_index=True)
+
+
+def render_option_scanner(round_step: int, tf_minutes: int, weeks_back: int, chart_context: int):
+    sec("STEP 1 : Prev-Day Nifty Spot")
 
     with st.spinner("Fetching prev-day Nifty spot..."):
         spot = fetch_spot_prev_day()
 
-    pivot_raw = (spot["high"] + spot["low"] + spot["close"]) / 3
-    pivot     = round50(pivot_raw)
-    ce_strike = pivot - itm_offset
-    pe_strike = pivot + itm_offset
-    expiry    = next_tuesday(date.today())
+    H, L, C = spot["high"], spot["low"], spot["close"]
+
+    # ── Pivot levels (raw + rounded) ──────────────────────────────────────────
+    pivot_raw = (H + L + C) / 3
+    r1_raw    = (pivot_raw * 2) - L
+    s1_raw    = (pivot_raw * 2) - H
+    r2_raw    = pivot_raw + (H - L)
+    s2_raw    = pivot_raw - (H - L)
+
+    pivot = round_n(pivot_raw, round_step)
+    r1    = round_n(r1_raw,    round_step)
+    s1    = round_n(s1_raw,    round_step)
+    r2    = round_n(r2_raw,    round_step)
+    s2    = round_n(s2_raw,    round_step)
+
+    expiry     = next_tuesday(date.today())
     expiry_api = expiry.strftime("%Y-%m-%d")
+    to_date    = datetime.today().strftime("%Y-%m-%d")
+    from_date  = (datetime.today() - timedelta(weeks=weeks_back + 1)).strftime("%Y-%m-%d")
 
-    c1,c2,c3,c4,c5,c6,c7 = st.columns(7)
-    card(c1, "Prev Day",         spot["date"],              "blue")
-    card(c2, "Prev High",        f"{spot['high']:,.2f}",    "green")
-    card(c3, "Prev Low",         f"{spot['low']:,.2f}",     "red")
-    card(c4, "Prev Close",       f"{spot['close']:,.2f}",   "")
-    card(c5, "Pivot (raw)",      f"{pivot_raw:,.2f}",       "")
-    card(c6, "Pivot ×50 = ATM",  f"{pivot:,}",              "orange")
-    card(c7, "Expiry (Tue)",     expiry_label(expiry),      "blue")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    sec(f"STEP 3 : ITM Strikes  (offset ±{itm_offset} pts from Pivot)")
-
-    c1, c2 = st.columns(2)
-    card(c1, f"CE Strike  (Pivot − {itm_offset})",  f"{ce_strike:,}",  "green")
-    card(c2, f"PE Strike  (Pivot + {itm_offset})",  f"{pe_strike:,}",  "red")
+    # ── Prev day cards ────────────────────────────────────────────────────────
+    c1,c2,c3,c4,c5 = st.columns(5)
+    card(c1, "Prev Day",   spot["date"],          "blue")
+    card(c2, "Prev High",  f"{H:,.2f}",           "green")
+    card(c3, "Prev Low",   f"{L:,.2f}",           "red")
+    card(c4, "Prev Close", f"{C:,.2f}",           "")
+    card(c5, "Expiry",     expiry_label(expiry),  "blue")
 
     st.markdown("<br>", unsafe_allow_html=True)
-    to_date   = datetime.today().strftime("%Y-%m-%d")
-    from_date = (datetime.today() - timedelta(weeks=weeks_back + 1)).strftime("%Y-%m-%d")
+    sec(f"STEP 2 : Pivot Levels  (raw  →  rounded to ×{round_step})")
 
-    for label, strike, opt_type, cls in [
-        ("CE — CALL (ITM)", ce_strike, "CE", "green"),
-        ("PE — PUT  (ITM)", pe_strike, "PE", "red"),
-    ]:
-        sec(f"STEPS 4–7 : {label}  |  75-min Trap Scan")
+    # Show raw and rounded side by side
+    cols = st.columns(10)
+    for i, (name, raw, rounded, cls) in enumerate([
+        ("Pivot",  pivot_raw, pivot, "orange"),
+        ("R1",     r1_raw,    r1,    "green"),
+        ("R2",     r2_raw,    r2,    "green"),
+        ("S1",     s1_raw,    s1,    "red"),
+        ("S2",     s2_raw,    s2,    "red"),
+    ]):
+        card(cols[i*2],     f"{name} (raw)", f"{raw:,.2f}",   "")
+        card(cols[i*2+1],   f"{name} ×{round_step}", f"{rounded:,}", cls)
 
-        # ── Step 4: instrument key ─────────────────────────────────────────────
-        with st.spinner(f"Looking up instrument key for {strike}{opt_type}..."):
-            key, err = get_instrument_key(strike, opt_type, expiry_api)
+    st.markdown("<br>", unsafe_allow_html=True)
+    sec(f"STEP 3 : CE + PE Trap Scan for each level  |  {tf_minutes}-min  |  BEARISH TRAPS only")
 
-        sym = trading_symbol(strike, opt_type, expiry)
+    # 5 levels × 2 sides = up to 10 contracts
+    levels = [
+        ("Pivot (ATM)", pivot),
+        ("R1",          r1),
+        ("R2",          r2),
+        ("S1",          s1),
+        ("S2",          s2),
+    ]
 
-        if err or not key:
-            key = option_key_upstox(strike, opt_type, expiry)
-            st.warning("Option chain lookup failed (token may be expired). Using constructed key.")
-        else:
-            st.success("Instrument key resolved from Upstox option chain.")
-
-        c1, c2, c3 = st.columns(3)
-        card(c1, "Trading Symbol",  sym,                           cls)
-        card(c2, "Instrument Key",  key,                           "blue")
-        card(c3, "Data Window",     f"{from_date}  →  {to_date}",  "")
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        # ── Step 5: fetch 1-min ───────────────────────────────────────────────
-        with st.spinner(f"Fetching 1-min data for {label}..."):
-            df1min, err = fetch_1min(key, from_date, to_date)
-
-        if err:
-            st.error(f"1-min fetch failed: {err}")
-            continue
-        if df1min is None or df1min.empty:
-            st.warning(f"No 1-min bars returned for `{key}`. Contract may not have started trading yet.")
-            continue
-
-        st.info(f"Fetched **{len(df1min):,}** 1-min bars")
-
-        # ── Step 6: resample → 75-min ─────────────────────────────────────────
-        with st.spinner("Resampling to 75-min..."):
-            df75 = resample_75min(df1min)
-
-        if df75.empty:
-            st.warning("Resample produced no 75-min bars.")
-            continue
-
-        st.info(f"Resampled to **{len(df75)}** bars of 75-min")
-
-        # ── Step 7: scan ──────────────────────────────────────────────────────
-        df_events, all_entries = scan_75min(df75)
-
-        total  = len(df_events)
-        closed = int((df_events["Status"] == "CLOSED").sum()) if total else 0
-        open_  = total - closed
-        open_traps = [e for e in all_entries if e["status"] == "TRAPPED"]
-
-        m1, m2, m3 = st.columns(3)
-        card(m1, "Bears Trapped",  str(total),  "blue")
-        card(m2, "Closed (0-loss)", str(closed), "green")
-        card(m3, "Still Open",      str(open_),  "orange")
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        # ── Trap events table ─────────────────────────────────────────────────
-        if not df_events.empty:
-            disp = df_events.copy()
-            for col in ["Trap Bar","Ref Bar","Close Bar"]:
-                disp[col] = disp[col].apply(
-                    lambda x: x.strftime("%d %b %y %H:%M") if pd.notna(x) else "-")
-            disp["Entry Level"] = disp["Entry Level"].map("{:.2f}".format)
-            disp["SL Level"]    = disp["SL Level"].map("{:.2f}".format)
-
-            def sc(val):
-                if val == "OPEN":   return "color:#E65100;font-weight:bold;"
-                if val == "CLOSED": return "color:#6B7280;"
-                return ""
-
-
-            styled = disp.style.map(sc, subset=["Status"])
-            st.dataframe(styled, use_container_width=True, height=300, hide_index=True)
-
-            # ── Chart drilldown ───────────────────────────────────────────────
-            st.markdown("<br>", unsafe_allow_html=True)
-            sec(f"CHART DRILLDOWN — {label}")
-
-            df_events_reset = df_events.reset_index(drop=True)
-            labels = [
-                f"{row['Trap Bar'].strftime('%d %b %y %H:%M')}  |  BEARS TRAPPED  "
-                f"|  Entry {row['Entry Level']:.2f}  SL {row['SL Level']:.2f}  |  {row['Status']}"
-                for _, row in df_events_reset.iterrows()
-            ]
-            sel_label = st.selectbox(f"Select trap ({label})", labels,
-                                     key=f"sel_{opt_type}", index=0)
-            sel_idx   = labels.index(sel_label)
-            sel_trap  = df_events_reset.iloc[sel_idx].to_dict()
-
-            if st.button(f"Show Chart — {label}", type="primary", key=f"btn_{opt_type}"):
-                fig = build_75min_chart(df75, sel_trap, context_bars=chart_context)
-                st.plotly_chart(fig, use_container_width=True)
-
-                status = sel_trap["Status"]
-                s_col  = "#E65100" if status == "OPEN" else "#6B7280"
-
-                st.markdown(f"""
-<div style="background:#F5F7FA;border:1px solid #DDE1E7;border-radius:8px;
-            padding:16px 24px;margin-top:10px;display:flex;gap:40px;flex-wrap:wrap;">
-  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Who Trapped</div>
-       <div style="color:#1B5E20;font-size:20px;font-weight:bold;">BEARS</div></div>
-  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Your Signal</div>
-       <div style="color:#1B5E20;font-size:20px;font-weight:bold;">BULLISH (BUY)</div></div>
-  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Your Entry</div>
-       <div style="color:#1565C0;font-size:20px;font-weight:bold;">{sel_trap['SL Level']:.2f}</div></div>
-  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Your SL</div>
-       <div style="color:#B71C1C;font-size:20px;font-weight:bold;">{sel_trap['Entry Level']:.2f}</div></div>
-  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Status</div>
-       <div style="color:{s_col};font-size:20px;font-weight:bold;">{status}</div></div>
-</div>""", unsafe_allow_html=True)
-        else:
-            st.info(f"No traps detected for {label} in this window.")
-
-        # ── Open traps summary ────────────────────────────────────────────────
-        if open_traps:
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown(f"**Currently open traps for {label} (market has NOT returned to entry):**")
-            rows = [{"Trapped On"   : e["trapped_on"].strftime("%d %b %y %H:%M"),
-                     "Kind"         : e["kind"],
-                     "Entry Level"  : f"{e['entry']:.2f}",
-                     "SL Level"     : f"{e['sl']:.2f}",
-                     "Signal"       : "BULLISH" if e["kind"]=="BEAR" else "BEARISH"}
-                    for e in sorted(open_traps, key=lambda x: x["trapped_on"])]
-            def sig_color(val):
-                if val == "BULLISH": return "color:#1B5E20;font-weight:bold;"
-                if val == "BEARISH": return "color:#B71C1C;font-weight:bold;"
-                return ""
-            st.dataframe(pd.DataFrame(rows).style.map(sig_color, subset=["Signal"]),
-                         use_container_width=True, height=200, hide_index=True)
-
-        # ── Raw 75-min bars ───────────────────────────────────────────────────
-        with st.expander(f"Raw 75-min bars — {label}"):
-            rc = df75.copy()
-            rc["datetime"] = rc["datetime"].dt.strftime("%d %b %y %H:%M")
-            rc["type"] = rc.apply(lambda r: "BULL" if r["close"] > r["open"] else "BEAR", axis=1)
-            def ct(v):
-                return "color:#1B5E20;font-weight:bold;" if v=="BULL" else "color:#B71C1C;font-weight:bold;"
-            st.dataframe(rc.style.map(ct, subset=["type"]),
-                         use_container_width=True, height=400, hide_index=True)
-
-        st.markdown("---")
+    for level_name, strike in levels:
+        with st.expander(f"▸ {level_name}  —  Strike {strike:,}", expanded=(level_name == "Pivot (ATM)")):
+            t1, t2 = st.tabs([f"CE  {strike}CE", f"PE  {strike}PE"])
+            with t1:
+                _scan_one_contract(f"{level_name} CE", strike, "CE", "green",
+                                   expiry, expiry_api, from_date, to_date,
+                                   tf_minutes, chart_context)
+            with t2:
+                _scan_one_contract(f"{level_name} PE", strike, "PE", "red",
+                                   expiry, expiry_api, from_date, to_date,
+                                   tf_minutes, chart_context)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -819,12 +832,15 @@ with st.sidebar:
     st.markdown("---")
 
     if active_tab == "Option 75-min Traps":
-        itm_offset   = st.number_input("ITM Offset (pts)", value=500, step=50,
-                                        help="CE = Pivot − offset, PE = Pivot + offset")
+        st.markdown("**Settings**")
+        round_step   = st.number_input("Round-off step (pts)", value=50, step=10, min_value=10,
+                                        help="All pivot levels rounded to nearest this value")
+        tf_minutes   = st.number_input("Timeframe (minutes)", value=75, step=5, min_value=5,
+                                        help="Bar size for trap detection")
         weeks_back   = st.selectbox("Data window",
                                     [1, 2, 3, 4], index=1,
                                     format_func=lambda w: f"Prev {w} week(s) + current")
-        chart_ctx    = st.slider("Chart context (75-min bars)", 5, 30, 10)
+        chart_ctx    = st.slider("Chart context (bars)", 5, 30, 10)
     else:
         weeks        = st.selectbox("Data Range (weeks)", [4, 8, 13, 26, 52], index=4,
                                     format_func=lambda w: f"{w} weeks")
@@ -858,9 +874,9 @@ HEADERS["Accept"] = "application/json"
 #  RENDER
 # ══════════════════════════════════════════════════════════════════════════════
 if active_tab == "Option 75-min Traps":
-    st.markdown("# Option 75-min Trap Scanner")
-    st.markdown("*Prev-day Nifty → Pivot → ITM Strikes → Instrument Keys → 75-min bars → Trap detection*")
-    render_option_scanner(itm_offset, weeks_back, chart_ctx)
+    st.markdown(f"# Option {tf_minutes}-min Trap Scanner")
+    st.markdown(f"*Prev-day Nifty → Pivot/R1/S1/R2/S2 (×{round_step}) → CE+PE for each level → {tf_minutes}-min bars → Bearish trap detection*")
+    render_option_scanner(round_step, tf_minutes, weeks_back, chart_ctx)
 else:
     st.markdown("# Daily Nifty Trap Scanner  *(52-week validation)*")
     st.markdown("*Validates trap logic on Nifty 50 daily candles*")
