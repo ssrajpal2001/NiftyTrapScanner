@@ -259,9 +259,19 @@ def morning_scan(strike, opt_type, expiry_api, expiry_date_str, htf_min, token,
     """
     Fetch prev-week + current-week data.
     Return ONLY TRAPPED (open) HTF entries — CLOSED ones are historical, not live.
+    Also returns a debug dict for troubleshooting.
     """
     expiry = datetime.strptime(expiry_date_str, "%Y-%m-%d").date()
-    key    = _get_instrument_key(strike, opt_type, expiry, expiry_api, token, index)
+
+    # Try option chain key first; capture the error for debug
+    raw_key, chain_err = _fetch_key(strike, opt_type, expiry_api, token, index)
+    cfg = INDEX_CONFIG[index]
+    if chain_err or not raw_key:
+        key = fallback_key(strike, opt_type, expiry, cfg["exchange"], cfg["key_prefix"])
+        key_source = f"fallback (chain err: {chain_err})"
+    else:
+        key = raw_key
+        key_source = "option_chain API"
 
     # Prev week Monday to today
     today  = date.today()
@@ -270,21 +280,31 @@ def morning_scan(strike, opt_type, expiry_api, expiry_date_str, htf_min, token,
     from_date = monday_prev_week.strftime("%Y-%m-%d")
     to_date   = today.strftime("%Y-%m-%d")
 
-    df1, err = _fetch_data(key, from_date, to_date, token)
-    if err or df1 is None or df1.empty:
-        return [], pd.DataFrame(), key, None, from_date
+    df1, fetch_err = _fetch_data(key, from_date, to_date, token)
+
+    dbg = {
+        "key": key, "key_source": key_source,
+        "from": from_date, "to": to_date,
+        "fetch_err": str(fetch_err) if fetch_err else None,
+        "rows_1min": len(df1) if df1 is not None and not df1.empty else 0,
+        "rows_htf": 0, "all_entries": 0, "open_traps": 0,
+    }
+
+    if fetch_err or df1 is None or df1.empty:
+        return [], pd.DataFrame(), key, None, from_date, dbg
 
     df_htf = resample_tf(df1, htf_min)
+    dbg["rows_htf"] = len(df_htf)
     if df_htf.empty:
-        return [], pd.DataFrame(), key, df1, from_date
+        return [], pd.DataFrame(), key, df1, from_date, dbg
 
     df_events, entries = scan_htf(df_htf)
+    dbg["all_entries"] = len(entries)
 
-    # ONLY TRAPPED = bears stopped out, zone not yet hit from above (live watch list)
-    # CLOSED = zone trigger already hit in the past (historical, skip)
     open_traps = [e for e in entries if e["status"] == "TRAPPED"]
+    dbg["open_traps"] = len(open_traps)
 
-    return open_traps, df_events, key, df1, from_date
+    return open_traps, df_events, key, df1, from_date, dbg
 
 
 # ==============================================================================
@@ -586,7 +606,7 @@ def main():
             sym = trading_symbol(strike, opt_type, expiry, prefix)
 
             with st.spinner(f"Loading {label}..."):
-                open_traps, df_events, key, df1, from_date = morning_scan(
+                open_traps, df_events, key, df1, from_date, dbg = morning_scan(
                     strike, opt_type, expiry_api, expiry_api,
                     htf_minutes, token, idx_name,
                 )
@@ -608,6 +628,13 @@ def main():
                 f"LTP: {f'{ltp:.2f}' if ltp else '--'}",
                 expanded=len(open_traps) > 0,
             ):
+                # Always show debug info so issues are visible
+                st.caption(
+                    f"Key: `{dbg['key']}` ({dbg['key_source']}) | "
+                    f"1-min bars: {dbg['rows_1min']} | HTF bars: {dbg['rows_htf']} | "
+                    f"All HTF entries: {dbg['all_entries']} | Open: {dbg['open_traps']}"
+                    + (f" | ERROR: {dbg['fetch_err']}" if dbg['fetch_err'] else "")
+                )
                 if open_traps:
                     rows = []
                     for e in open_traps:
