@@ -710,7 +710,8 @@ def main():
             lines = f.readlines()
         # Show last 30 lines
         tail = "".join(lines[-30:])
-        st.text_area("", tail, height=250, key="log_tail")
+        st.text_area("Event Log", tail, height=250, key="log_tail",
+                     label_visibility="collapsed")
 
     # -- Auto-refresh ----------------------------------------------------------
     if auto_refresh:

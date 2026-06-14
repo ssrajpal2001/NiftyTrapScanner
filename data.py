@@ -101,6 +101,7 @@ def get_instrument_key(strike: int, opt_type: str, expiry_str: str,
     body = r.json()
     if body.get("status") != "success":
         return None, body
+    found_strikes = []
     for item in body.get("data", []):
         for side in ["call_options", "put_options"]:
             opt = item.get(side, {})
@@ -108,9 +109,12 @@ def get_instrument_key(strike: int, opt_type: str, expiry_str: str,
             key = opt.get("instrument_key") or mkt.get("instrument_key")
             s   = item.get("strike_price") or opt.get("strike_price")
             t   = "CE" if side == "call_options" else "PE"
-            if key and s and int(s) == strike and t == opt_type:
+            if s is not None:
+                found_strikes.append(f"{int(float(s))}{t}")
+            if key and s is not None and int(float(s)) == strike and t == opt_type:
                 return key, None
-    return None, {"msg": f"Strike {strike}{opt_type} not found in option chain"}
+    sample = found_strikes[:10]
+    return None, {"msg": f"Strike {strike}{opt_type} not found. Chain had: {sample}"}
 
 
 def fetch_1min(instrument_key: str, from_date: str, to_date: str,
