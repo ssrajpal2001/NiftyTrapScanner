@@ -210,23 +210,18 @@ def resample_75min(df_1min: pd.DataFrame) -> pd.DataFrame:
 
 def scan_75min(df75: pd.DataFrame):
     """
-    Scans for BOTH bearish traps AND bullish traps on 75-min option bars.
+    BEARISH TRAP only on 75-min option bars.
 
-    BEARISH TRAP (bears entered short):
-      curr LOW < prev LOW  → BEAR entry at prev LOW, SL at prev HIGH
-      future HIGH > SL     → BEARS TRAPPED
-      future LOW <= entry  → BEARS CLOSED (0-loss exit)
-
-    BULLISH TRAP (bulls entered long):
-      curr HIGH > prev HIGH → BULL entry at prev HIGH, SL at prev LOW
-      future LOW < SL       → BULLS TRAPPED
-      future HIGH >= entry  → BULLS CLOSED (0-loss exit)
+    Rule: curr LOW < prev LOW
+      → BEAR entry at prev LOW, SL at prev HIGH
+      → BEARS TRAPPED when future HIGH > SL
+      → BEARS CLOSED when future LOW <= entry (0-loss exit)
     """
     entries = []
     events  = []
 
-    def make(kind, ref_ts, entry, sl):
-        return {"kind": kind, "ref_ts": ref_ts, "entry": entry, "sl": sl,
+    def make(ref_ts, entry, sl):
+        return {"ref_ts": ref_ts, "entry": entry, "sl": sl,
                 "status": "ACTIVE", "trapped_on": None, "closed_on": None, "event_idx": None}
 
     for i in range(1, len(df75)):
@@ -237,49 +232,26 @@ def scan_75min(df75: pd.DataFrame):
         for e in entries:
             if e["status"] == "CLOSED":
                 continue
-            if e["kind"] == "BEAR":
-                if e["status"] == "ACTIVE" and curr["high"] > e["sl"]:
-                    e["status"]     = "TRAPPED"
-                    e["trapped_on"] = ts
-                    e["event_idx"]  = len(events)
-                    events.append({
-                        "Trap Bar"    : ts,
-                        "Who Trapped" : "BEARS",
-                        "Ref Bar"     : e["ref_ts"],
-                        "Entry Level" : e["entry"],
-                        "SL Level"    : e["sl"],
-                        "Status"      : "OPEN",
-                        "Close Bar"   : pd.NaT,
-                    })
-                if e["status"] == "TRAPPED" and curr["low"] <= e["entry"]:
-                    e["status"]    = "CLOSED"
-                    e["closed_on"] = ts
-                    events[e["event_idx"]]["Status"]    = "CLOSED"
-                    events[e["event_idx"]]["Close Bar"] = ts
-            else:  # BULL
-                if e["status"] == "ACTIVE" and curr["low"] < e["sl"]:
-                    e["status"]     = "TRAPPED"
-                    e["trapped_on"] = ts
-                    e["event_idx"]  = len(events)
-                    events.append({
-                        "Trap Bar"    : ts,
-                        "Who Trapped" : "BULLS",
-                        "Ref Bar"     : e["ref_ts"],
-                        "Entry Level" : e["entry"],
-                        "SL Level"    : e["sl"],
-                        "Status"      : "OPEN",
-                        "Close Bar"   : pd.NaT,
-                    })
-                if e["status"] == "TRAPPED" and curr["high"] >= e["entry"]:
-                    e["status"]    = "CLOSED"
-                    e["closed_on"] = ts
-                    events[e["event_idx"]]["Status"]    = "CLOSED"
-                    events[e["event_idx"]]["Close Bar"] = ts
+            if e["status"] == "ACTIVE" and curr["high"] > e["sl"]:
+                e["status"]     = "TRAPPED"
+                e["trapped_on"] = ts
+                e["event_idx"]  = len(events)
+                events.append({
+                    "Trap Bar"    : ts,
+                    "Ref Bar"     : e["ref_ts"],
+                    "Entry Level" : e["entry"],
+                    "SL Level"    : e["sl"],
+                    "Status"      : "OPEN",
+                    "Close Bar"   : pd.NaT,
+                })
+            if e["status"] == "TRAPPED" and curr["low"] <= e["entry"]:
+                e["status"]    = "CLOSED"
+                e["closed_on"] = ts
+                events[e["event_idx"]]["Status"]    = "CLOSED"
+                events[e["event_idx"]]["Close Bar"] = ts
 
         if curr["low"] < prev["low"]:
-            entries.append(make("BEAR", prev["datetime"], prev["low"], prev["high"]))
-        if curr["high"] > prev["high"]:
-            entries.append(make("BULL", prev["datetime"], prev["high"], prev["low"]))
+            entries.append(make(prev["datetime"], prev["low"], prev["high"]))
 
     return pd.DataFrame(events) if events else pd.DataFrame(), entries
 
@@ -289,12 +261,11 @@ def build_75min_chart(df75: pd.DataFrame, trap_row: dict, context_bars: int = 10
     close_ts = pd.Timestamp(trap_row["Close Bar"]) if pd.notna(trap_row.get("Close Bar")) else None
     entry    = float(trap_row["Entry Level"])
     sl       = float(trap_row["SL Level"])
-    who      = trap_row["Who Trapped"]
     status   = trap_row["Status"]
 
-    your_entry = sl      # where trap fired = your trade entry
-    your_sl    = entry   # trapped side's original entry = your SL
-    trade_dir  = "BULLISH (BUY)" if who == "BEARS" else "BEARISH (SELL)"
+    your_entry = sl
+    your_sl    = entry
+    trade_dir  = "BULLISH (BUY)"
 
     idx = df75[df75["datetime"] <= trap_ts].index
     if len(idx) == 0:
@@ -351,7 +322,7 @@ def build_75min_chart(df75: pd.DataFrame, trap_row: dict, context_bars: int = 10
     status_badge = "🟠 OPEN" if status == "OPEN" else "⚪ CLOSED"
     fig.update_layout(
         title=dict(
-            text=f"{who} TRAPPED → {trade_dir}  |  {status_badge}  |  "
+            text=f"BEARS TRAPPED → {trade_dir}  |  {status_badge}  |  "
                  f"Trap: {trap_ts.strftime('%d %b %Y %H:%M')}",
             font=dict(color="#1A1A2E", size=14),
         ),
@@ -456,11 +427,10 @@ def render_option_scanner(itm_offset: int, weeks_back: int, chart_context: int):
         open_  = total - closed
         open_traps = [e for e in all_entries if e["status"] == "TRAPPED"]
 
-        m1, m2, m3, m4 = st.columns(4)
-        card(m1, "Traps Fired",      str(total),  "blue")
-        card(m2, "Bears Trapped",    str(int((df_events["Who Trapped"]=="BEARS").sum())) if total else "0", "green")
-        card(m3, "Bulls Trapped",    str(int((df_events["Who Trapped"]=="BULLS").sum())) if total else "0", "red")
-        card(m4, "Still Open",       str(open_),  "orange")
+        m1, m2, m3 = st.columns(3)
+        card(m1, "Bears Trapped",  str(total),  "blue")
+        card(m2, "Closed (0-loss)", str(closed), "green")
+        card(m3, "Still Open",      str(open_),  "orange")
         st.markdown("<br>", unsafe_allow_html=True)
 
         # ── Trap events table ─────────────────────────────────────────────────
@@ -477,14 +447,8 @@ def render_option_scanner(itm_offset: int, weeks_back: int, chart_context: int):
                 if val == "CLOSED": return "color:#6B7280;"
                 return ""
 
-            def wc(val):
-                if val == "BEARS": return "color:#1B5E20;font-weight:bold;"
-                if val == "BULLS": return "color:#B71C1C;font-weight:bold;"
-                return ""
 
-            styled = (disp.style
-                      .map(sc, subset=["Status"])
-                      .map(wc, subset=["Who Trapped"]))
+            styled = disp.style.map(sc, subset=["Status"])
             st.dataframe(styled, use_container_width=True, height=300, hide_index=True)
 
             # ── Chart drilldown ───────────────────────────────────────────────
@@ -493,7 +457,7 @@ def render_option_scanner(itm_offset: int, weeks_back: int, chart_context: int):
 
             df_events_reset = df_events.reset_index(drop=True)
             labels = [
-                f"{row['Trap Bar'].strftime('%d %b %y %H:%M')}  |  {row['Who Trapped']} TRAPPED  "
+                f"{row['Trap Bar'].strftime('%d %b %y %H:%M')}  |  BEARS TRAPPED  "
                 f"|  Entry {row['Entry Level']:.2f}  SL {row['SL Level']:.2f}  |  {row['Status']}"
                 for _, row in df_events_reset.iterrows()
             ]
@@ -506,19 +470,16 @@ def render_option_scanner(itm_offset: int, weeks_back: int, chart_context: int):
                 fig = build_75min_chart(df75, sel_trap, context_bars=chart_context)
                 st.plotly_chart(fig, use_container_width=True)
 
-                who    = sel_trap["Who Trapped"]
                 status = sel_trap["Status"]
-                trade  = "BULLISH (BUY)" if who == "BEARS" else "BEARISH (SELL)"
-                color  = "#1B5E20" if who == "BEARS" else "#B71C1C"
                 s_col  = "#E65100" if status == "OPEN" else "#6B7280"
 
                 st.markdown(f"""
 <div style="background:#F5F7FA;border:1px solid #DDE1E7;border-radius:8px;
             padding:16px 24px;margin-top:10px;display:flex;gap:40px;flex-wrap:wrap;">
   <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Who Trapped</div>
-       <div style="color:{color};font-size:20px;font-weight:bold;">{who}</div></div>
+       <div style="color:#1B5E20;font-size:20px;font-weight:bold;">BEARS</div></div>
   <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Your Signal</div>
-       <div style="color:{color};font-size:20px;font-weight:bold;">{trade}</div></div>
+       <div style="color:#1B5E20;font-size:20px;font-weight:bold;">BULLISH (BUY)</div></div>
   <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Your Entry</div>
        <div style="color:#1565C0;font-size:20px;font-weight:bold;">{sel_trap['SL Level']:.2f}</div></div>
   <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Your SL</div>
