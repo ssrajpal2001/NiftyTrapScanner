@@ -21,50 +21,57 @@ st.set_page_config(
 st.markdown("""
 <style>
 html, body, [data-testid="stAppViewContainer"] {
-    background-color: #0D1117;
-    color: #C9D1D9;
-    font-family: 'Segoe UI', monospace;
+    background-color: #FFFFFF;
+    color: #1A1A2E;
+    font-family: 'Segoe UI', sans-serif;
 }
 [data-testid="stSidebar"] {
-    background-color: #161B22;
-    border-right: 1px solid #30363D;
+    background-color: #F5F7FA;
+    border-right: 1px solid #DDE1E7;
 }
-h1, h2, h3 { color: #58A6FF; }
+h1, h2, h3 { color: #1565C0; }
 .metric-card {
-    background: #161B22;
-    border: 1px solid #30363D;
+    background: #F5F7FA;
+    border: 1px solid #DDE1E7;
     border-radius: 8px;
     padding: 16px 20px;
     text-align: center;
 }
-.metric-label { color: #8B949E; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
-.metric-value { color: #C9D1D9; font-size: 28px; font-weight: bold; margin-top: 4px; }
-.metric-value.green  { color: #238636; }
-.metric-value.red    { color: #DA3633; }
-.metric-value.blue   { color: #58A6FF; }
-.metric-value.orange { color: #f0a500; }
+.metric-label { color: #6B7280; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
+.metric-value { color: #1A1A2E; font-size: 28px; font-weight: bold; margin-top: 4px; }
+.metric-value.green  { color: #1B5E20; }
+.metric-value.red    { color: #B71C1C; }
+.metric-value.blue   { color: #1565C0; }
+.metric-value.orange { color: #E65100; }
 .section-header {
-    background: #161B22;
-    border-left: 3px solid #58A6FF;
+    background: #EFF3FB;
+    border-left: 4px solid #1565C0;
     padding: 8px 14px;
     margin: 18px 0 10px 0;
     font-size: 14px;
     font-weight: 600;
-    color: #58A6FF;
+    color: #1565C0;
     letter-spacing: 0.5px;
+    border-radius: 0 4px 4px 0;
 }
-div[data-testid="stDataFrame"] { border: 1px solid #30363D; border-radius: 6px; }
+div[data-testid="stDataFrame"] { border: 1px solid #DDE1E7; border-radius: 6px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ── token (replace daily or move to .env) ─────────────────────────────────────
-TOKEN = st.secrets.get("UPSTOX_TOKEN", "") or (
-    "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ"
-    ".eyJzdWIiOiI0SkNIRDciLCJqdGkiOiI2YTJkNzdjZjU3MmUyNTUzMjYwMDNjOD"
-    "QiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0Ij"
-    "oxNzgxMzY0Njg3LCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOj"
-    "E3ODEzODgwMDB9.m7y4u0urqwF2SYUY-i4bg5r6TJarFYa7uyG7_rlsoJI"
-)
+try:
+    TOKEN = st.secrets.get("UPSTOX_TOKEN", "") or ""
+except Exception:
+    TOKEN = ""
+
+if not TOKEN:
+    TOKEN = (
+        "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ"
+        ".eyJzdWIiOiI0SkNIRDciLCJqdGkiOiI2YTJkNzdjZjU3MmUyNTUzMjYwMDNjOD"
+        "QiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0Ij"
+        "oxNzgxMzY0Njg3LCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOj"
+        "E3ODEzODgwMDB9.m7y4u0urqwF2SYUY-i4bg5r6TJarFYa7uyG7_rlsoJI"
+    )
 
 
 # ── fetch ──────────────────────────────────────────────────────────────────────
@@ -253,17 +260,17 @@ def build_trap_chart(df_candles: pd.DataFrame, trap_row: dict, context_bars: int
         title=dict(
             text=f"{who} TRAPPED → {trade_dir}  |  {status_badge}  |  "
                  f"Trap: {trap_date.strftime('%d %b %Y')}",
-            font=dict(color="#C9D1D9", size=15),
+            font=dict(color="#1A1A2E", size=15),
         ),
-        paper_bgcolor="#0D1117",
-        plot_bgcolor="#0D1117",
-        font=dict(color="#C9D1D9"),
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FAFBFC",
+        font=dict(color="#1A1A2E"),
         xaxis=dict(
-            gridcolor="#21262D",
+            gridcolor="#E8ECF0",
             rangeslider=dict(visible=False),
             type="category",
         ),
-        yaxis=dict(gridcolor="#21262D"),
+        yaxis=dict(gridcolor="#E8ECF0"),
         margin=dict(l=60, r=120, t=60, b=40),
         height=520,
     )
@@ -410,30 +417,30 @@ else:
         who    = selected_trap["Who Got Trapped"]
         status = selected_trap["Status"]
         trade  = "BULLISH (BUY)" if who == "BEARS" else "BEARISH (SELL)"
-        color  = "#238636" if who == "BEARS" else "#DA3633"
-        s_col  = "#f0a500" if status == "OPEN" else "#8B949E"
+        color  = "#1B5E20" if who == "BEARS" else "#B71C1C"
+        s_col  = "#E65100" if status == "OPEN" else "#6B7280"
 
         st.markdown(f"""
-<div style="background:#161B22;border:1px solid #30363D;border-radius:8px;
+<div style="background:#F5F7FA;border:1px solid #DDE1E7;border-radius:8px;
             padding:16px 24px;margin-top:12px;display:flex;gap:40px;flex-wrap:wrap;">
   <div>
-    <div style="color:#8B949E;font-size:11px;text-transform:uppercase;">Who Got Trapped</div>
+    <div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Who Got Trapped</div>
     <div style="color:{color};font-size:20px;font-weight:bold;">{who}</div>
   </div>
   <div>
-    <div style="color:#8B949E;font-size:11px;text-transform:uppercase;">Your Trade Signal</div>
+    <div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Your Trade Signal</div>
     <div style="color:{color};font-size:20px;font-weight:bold;">{trade}</div>
   </div>
   <div>
-    <div style="color:#8B949E;font-size:11px;text-transform:uppercase;">Your Entry</div>
-    <div style="color:#58A6FF;font-size:20px;font-weight:bold;">{selected_trap['SL Level']:.2f}</div>
+    <div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Your Entry</div>
+    <div style="color:#1565C0;font-size:20px;font-weight:bold;">{selected_trap['SL Level']:.2f}</div>
   </div>
   <div>
-    <div style="color:#8B949E;font-size:11px;text-transform:uppercase;">Your Stop Loss</div>
-    <div style="color:#DA3633;font-size:20px;font-weight:bold;">{selected_trap['Entry Level']:.2f}</div>
+    <div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Your Stop Loss</div>
+    <div style="color:#B71C1C;font-size:20px;font-weight:bold;">{selected_trap['Entry Level']:.2f}</div>
   </div>
   <div>
-    <div style="color:#8B949E;font-size:11px;text-transform:uppercase;">Status</div>
+    <div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Status</div>
     <div style="color:{s_col};font-size:20px;font-weight:bold;">{status}</div>
   </div>
 </div>
