@@ -233,10 +233,11 @@ def scan_one_contract(label, strike, opt_type, cls,
         return
 
     df_htf_events, htf_entries = scan_htf(df_htf)
-    htf_open = [e for e in htf_entries if e["status"] == "TRAPPED"]   # OPEN HTF traps
+    # ALL trapped entries (OPEN = zone active, CLOSED = zone trigger already hit)
+    htf_trapped = [e for e in htf_entries if e["status"] in ("TRAPPED", "CLOSED")]
 
     st.caption(f"{len(df1):,} 1-min bars  →  {len(df_htf)} bars at {htf_minutes}-min  |  "
-               f"HTF traps: {len(df_htf_events)}  (OPEN: {len(htf_open)})")
+               f"HTF traps found: {len(df_htf_events)}  (triggered: {len(htf_trapped)})")
 
     # ── HTF trap table ────────────────────────────────────────────────────────
     if not df_htf_events.empty:
@@ -262,85 +263,106 @@ def scan_one_contract(label, strike, opt_type, cls,
         )
     else:
         st.info(f"No HTF bearish traps found for {sym}.")
+        return
 
-    # ── LTF drill-down for each OPEN HTF trap ─────────────────────────────────
-    if not htf_open:
-        st.caption("No OPEN HTF traps — nothing to drill into LTF.")
-    else:
-        st.markdown(f"---\n#### LTF ({ltf_minutes}-min) Drill-Down  |  {len(htf_open)} OPEN HTF trap(s)")
+    if not htf_trapped:
+        st.caption("No HTF traps triggered yet — nothing to drill into LTF.")
+        return
 
-    all_ltf_entries = []    # collect across all HTF traps for combined backtest
-    htf_target_map  = {}    # closed_on_ts → htf target price
+    # ── Resample to LTF once ──────────────────────────────────────────────────
+    df_ltf = resample_tf(df1, ltf_minutes)
+    if df_ltf.empty:
+        st.warning("LTF resample produced no bars.")
+        return
 
-    for htf_e in htf_open:
+    st.markdown(f"---\n#### LTF ({ltf_minutes}-min) Drill-Down")
+
+    selected_ltf_entry = None   # will hold the ONE entry to trade (lowest Zone Low)
+    all_ltf_rows       = []     # for display table showing all LTF traps found
+
+    for htf_e in htf_trapped:
         zh  = htf_e["zone_high"]
         zl  = htf_e["zone_low"]
-        tgt = htf_e["sl"]   # HTF target = where HTF bears were stopped
+        tgt = htf_e["sl"]
+        trap_ts = pd.Timestamp(htf_e["trapped_on"])
 
-        st.markdown(
-            f"**HTF Zone:** {zh:.2f} → {zl:.2f}  |  "
-            f"HTF Target (bears SL): **{tgt:.2f}**  |  "
-            f"Trapped on: {htf_e['trapped_on'].strftime('%d %b %y %H:%M') if htf_e['trapped_on'] else '-'}"
-        )
+        htf_ref_label  = pd.Timestamp(htf_e["ref_ts"]).strftime("%d %b %y %H:%M")
+        htf_trap_label = trap_ts.strftime("%d %b %y %H:%M")
 
-        # ── LTF resample + scan inside HTF zone ───────────────────────────────
-        df_ltf = resample_tf(df1, ltf_minutes)
-        if df_ltf.empty:
-            st.caption("  No LTF bars.")
+        # Only scan LTF bars AFTER the HTF trap fired
+        df_ltf_after = df_ltf[df_ltf["datetime"] >= trap_ts].copy().reset_index(drop=True)
+        if len(df_ltf_after) < 2:
             continue
 
-        htf_ref_label  = htf_e["ref_ts"].strftime("%d %b %y %H:%M")  if htf_e.get("ref_ts")      else "—"
-        htf_trap_label = htf_e["trapped_on"].strftime("%d %b %y %H:%M") if htf_e.get("trapped_on") else "—"
-
         df_ltf_events, ltf_entries = scan_ltf(
-            df_ltf, zh, zl,
+            df_ltf_after, zh, zl,
             htf_ref_bar  = htf_ref_label,
             htf_trap_bar = htf_trap_label,
             htf_target   = tgt,
         )
-        ltf_closed = [e for e in ltf_entries if e["status"] == "CLOSED"]
 
         if df_ltf_events.empty:
-            st.caption(f"  No LTF bearish traps inside zone {zh:.2f}–{zl:.2f}.")
             continue
 
-        # ── LTF trap table ─────────────────────────────────────────────────────
-        disp_ltf = df_ltf_events.copy()
-        for col in ["Trap Bar", "Ref Bar", "Close Bar"]:
-            disp_ltf[col] = disp_ltf[col].apply(
-                lambda x: x.strftime("%d %b %y %H:%M") if pd.notna(x) else "-")
-        for col in ["Bear Entry", "SL Level", "Zone High", "Zone Low", "Your Entry"]:
-            if col in disp_ltf.columns:
-                disp_ltf[col] = disp_ltf[col].map("{:.2f}".format)
+        # Collect all LTF rows for display
+        for _, row in df_ltf_events.iterrows():
+            all_ltf_rows.append({
+                "HTF Ref Bar"    : htf_ref_label,
+                "HTF Trap Bar"   : htf_trap_label,
+                "HTF Zone High"  : round(zh,  2),
+                "HTF Zone Low"   : round(zl,  2),
+                "HTF Target"     : round(tgt, 2),
+                "LTF Trap Bar"   : row["Trap Bar"].strftime("%d %b %y %H:%M") if pd.notna(row["Trap Bar"]) else "-",
+                "LTF Ref Bar"    : row["Ref Bar"].strftime("%d %b %y %H:%M")  if pd.notna(row["Ref Bar"])  else "-",
+                "LTF Zone High"  : row["Zone High"],
+                "LTF Zone Low"   : row["Zone Low"],
+                "LTF Your Entry" : row["Your Entry"],
+                "LTF Status"     : row["Status"],
+                "LTF Close Bar"  : row["Close Bar"].strftime("%d %b %y %H:%M") if pd.notna(row.get("Close Bar")) else "-",
+            })
 
-        def sc2(v):
+        # ── Select ONLY the LOWEST Zone Low among CLOSED LTF traps ───────────
+        closed_ltf = [e for e in ltf_entries if e["status"] == "CLOSED"]
+        if not closed_ltf:
+            continue
+
+        lowest = min(closed_ltf, key=lambda e: e["zone_low"])
+
+        # Keep the globally lowest Zone Low across all HTF traps
+        if (selected_ltf_entry is None or
+                lowest["zone_low"] < selected_ltf_entry["zone_low"]):
+            selected_ltf_entry = lowest
+
+    # ── Show all LTF traps found (informational) ──────────────────────────────
+    if all_ltf_rows:
+        def sc3(v):
             if v == "OPEN":   return "color:#E65100;font-weight:bold;"
             if v == "CLOSED": return "color:#6B7280;"
             return ""
 
+        df_ltf_display = pd.DataFrame(all_ltf_rows)
+        # Highlight selected entry row
         st.dataframe(
-            disp_ltf[["Trap Bar","Ref Bar","Bear Entry","SL Level",
-                       "Zone High","Zone Low","Your Entry","Status","Close Bar"]]
-            .style.map(sc2, subset=["Status"]),
-            use_container_width=True, height=200, hide_index=True,
+            df_ltf_display.style.map(sc3, subset=["LTF Status"]),
+            use_container_width=True, height=min(42 * len(df_ltf_display) + 50, 400),
+            hide_index=True,
         )
+        if selected_ltf_entry:
+            st.success(
+                f"✅ **Selected Entry** — Lowest LTF Zone Low: **{selected_ltf_entry['zone_low']:.2f}**  |  "
+                f"Your Entry (1/3 trigger): **{selected_ltf_entry['zone_trigger']:.2f}**  |  "
+                f"LTF Zone High: **{selected_ltf_entry['zone_high']:.2f}**"
+            )
+    else:
+        st.info("No LTF bearish traps found inside any HTF zone.")
 
-        # Map each LTF closed entry → HTF target (for backtest)
-        for e in ltf_closed:
-            if e.get("closed_on"):
-                htf_target_map[e["closed_on"]] = tgt
-
-        all_ltf_entries.extend(ltf_entries)
-
-    # ── Combined LTF backtest ─────────────────────────────────────────────────
-    if all_ltf_entries:
+    # ── Backtest — ONE trade per HTF zone (lowest Zone Low only) ─────────────
+    if selected_ltf_entry:
         st.markdown("---")
-        sec(f"BACKTEST — LTF Trades  |  Qty {DEFAULT_QTY} × Lot {DEFAULT_LOT_SIZE} = {DEFAULT_QTY * DEFAULT_LOT_SIZE} units  |  Intraday")
+        sec(f"BACKTEST — 1 Trade (Lowest LTF Zone)  |  Qty {DEFAULT_QTY} × Lot {DEFAULT_LOT_SIZE} = {DEFAULT_QTY * DEFAULT_LOT_SIZE} units  |  Intraday")
 
-        df_ltf_full = resample_tf(df1, ltf_minutes)
-        df_trades   = backtest(
-            df_ltf_full, all_ltf_entries,
-            htf_target_map=htf_target_map,
+        df_trades = backtest(
+            df_ltf, [selected_ltf_entry],
             buffer=sl_buffer,
             qty=DEFAULT_QTY, lot_size=DEFAULT_LOT_SIZE,
         )
