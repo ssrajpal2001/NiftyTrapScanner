@@ -152,6 +152,9 @@ def next_weekday(ref: date, weekday: int) -> date:
 def next_tuesday(ref: date) -> date:
     return next_weekday(ref, 1)
 
+def next_thursday(ref: date) -> date:
+    return next_weekday(ref, 3)
+
 def next_friday(ref: date) -> date:
     return next_weekday(ref, 4)
 
@@ -159,19 +162,21 @@ def next_friday(ref: date) -> date:
 INDEX_CONFIG = {
     "Nifty": {
         "label"        : "Nifty 50",
-        "strike_step"  : 100,       # default; overridden by sidebar
+        "strike_step"  : 100,
         "expiry_fn"    : next_tuesday,
         "symbol_prefix": "NIFTY",
         "exchange"     : "NSE_FO",
         "key_prefix"   : "NIFTY",
+        "numeric_keys" : False,   # NSE keys are human-readable, fallback works
     },
     "Sensex": {
         "label"        : "Sensex",
         "strike_step"  : 100,
-        "expiry_fn"    : next_friday,
+        "expiry_fn"    : next_thursday,  # BSE Sensex expires Thursday
         "symbol_prefix": "SENSEX",
         "exchange"     : "BSE_FO",
         "key_prefix"   : "SENSEX",
+        "numeric_keys" : True,    # BSE keys are numeric (BSE_FO|1174580), no fallback
     },
 }
 
@@ -237,10 +242,12 @@ def _fetch_data(key, from_date, to_date, token):
 
 
 def _get_instrument_key(strike, opt_type, expiry, expiry_api, token,
-                        index: str = "Nifty") -> str:
+                        index: str = "Nifty") -> str | None:
     key, err = _fetch_key(strike, opt_type, expiry_api, token, index)
     if err or not key:
         cfg = INDEX_CONFIG[index]
+        if cfg.get("numeric_keys"):
+            return None   # BSE uses numeric IDs — cannot construct fallback
         key = fallback_key(strike, opt_type, expiry,
                            cfg["exchange"], cfg["key_prefix"])
     return key
@@ -273,8 +280,12 @@ def morning_scan(strike, opt_type, expiry_api, expiry_date_str, htf_min, token,
     raw_key, chain_err = _fetch_key(strike, opt_type, expiry_api, token, index)
     cfg = INDEX_CONFIG[index]
     if chain_err or not raw_key:
-        key = fallback_key(strike, opt_type, expiry, cfg["exchange"], cfg["key_prefix"])
-        key_source = f"fallback (chain err: {chain_err})"
+        if cfg.get("numeric_keys"):
+            key = None
+            key_source = f"no key (BSE numeric, chain err: {chain_err})"
+        else:
+            key = fallback_key(strike, opt_type, expiry, cfg["exchange"], cfg["key_prefix"])
+            key_source = f"fallback (chain err: {chain_err})"
     else:
         key = raw_key
         key_source = "option_chain API"
@@ -289,14 +300,14 @@ def morning_scan(strike, opt_type, expiry_api, expiry_date_str, htf_min, token,
     df1, fetch_err = _fetch_data(key, from_date, to_date, token)
 
     dbg = {
-        "key": key, "key_source": key_source,
+        "key": key or "NONE", "key_source": key_source,
         "from": from_date, "to": to_date,
         "fetch_err": str(fetch_err) if fetch_err else None,
         "rows_1min": len(df1) if df1 is not None and not df1.empty else 0,
         "rows_htf": 0, "all_entries": 0, "open_traps": 0,
     }
 
-    if fetch_err or df1 is None or df1.empty:
+    if key is None or fetch_err or df1 is None or df1.empty:
         return [], pd.DataFrame(), key, None, from_date, dbg
 
     df_htf = resample_tf(df1, htf_min)
@@ -636,7 +647,7 @@ def main():
 
             df1_map[sym] = df1
 
-            if df1 is not None:
+            if df1 is not None and key:
                 df1_live, _ = _fetch_data(key, from_date,
                                           date.today().strftime("%Y-%m-%d"), token)
                 if df1_live is not None and not df1_live.empty:
