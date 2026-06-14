@@ -141,14 +141,49 @@ def browser_notify(title: str, body: str):
 def round_n(v: float, step: int) -> int:
     return int(round(v / step) * step)
 
-def next_tuesday(ref: date) -> date:
-    days = (1 - ref.weekday()) % 7
+def next_weekday(ref: date, weekday: int) -> date:
+    """Next occurrence of weekday (0=Mon … 6=Sun) strictly after ref."""
+    days = (weekday - ref.weekday()) % 7
     if days == 0:
         days = 7
     return ref + timedelta(days=days)
 
-def trading_symbol(strike: int, opt_type: str, expiry: date) -> str:
-    return f"NIFTY{expiry.strftime('%d%b%y').upper()}{strike}{opt_type}"
+def next_tuesday(ref: date) -> date:
+    return next_weekday(ref, 1)
+
+def next_friday(ref: date) -> date:
+    return next_weekday(ref, 4)
+
+# Index-specific config
+INDEX_CONFIG = {
+    "Nifty": {
+        "label"        : "Nifty 50",
+        "strike_step"  : 100,       # default; overridden by sidebar
+        "expiry_fn"    : next_tuesday,
+        "symbol_prefix": "NIFTY",
+        "exchange"     : "NSE_FO",
+        "key_prefix"   : "NIFTY",
+    },
+    "Sensex": {
+        "label"        : "Sensex",
+        "strike_step"  : 100,
+        "expiry_fn"    : next_friday,
+        "symbol_prefix": "SENSEX",
+        "exchange"     : "BSE_FO",
+        "key_prefix"   : "SENSEX",
+    },
+}
+
+def trading_symbol(strike: int, opt_type: str, expiry: date,
+                   prefix: str = "NIFTY") -> str:
+    return f"{prefix}{expiry.strftime('%d%b%y').upper()}{strike}{opt_type}"
+
+def fallback_key(strike: int, opt_type: str, expiry: date,
+                 exchange: str, key_prefix: str) -> str:
+    """Build Upstox instrument key without API lookup."""
+    return (f"{exchange}|{key_prefix}"
+            f"{expiry.strftime('%y')}{expiry.strftime('%m')}{expiry.strftime('%d')}"
+            f"{strike}{opt_type}")
 
 def card(col, label, value, cls=""):
     col.markdown(f"""<div class="metric-card">
@@ -179,14 +214,14 @@ def _get_token() -> str:
 
 # -- cached data fetchers ------------------------------------------------------
 @st.cache_data(ttl=300)
-def _fetch_spot(token):
+def _fetch_spot(token, index: str = "Nifty"):
     h = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    return fetch_spot_prev_day(h)
+    return fetch_spot_prev_day(h, index)
 
 @st.cache_data(ttl=300)
-def _fetch_key(strike, opt_type, expiry_str, token):
+def _fetch_key(strike, opt_type, expiry_str, token, index: str = "Nifty"):
     h = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    return get_instrument_key(strike, opt_type, expiry_str, h)
+    return get_instrument_key(strike, opt_type, expiry_str, h, index)
 
 @st.cache_data(ttl=30)   # 30s TTL for live price updates
 def _fetch_data(key, from_date, to_date, token):
@@ -194,12 +229,13 @@ def _fetch_data(key, from_date, to_date, token):
     return fetch_1min(key, from_date, to_date, h)
 
 
-def _get_instrument_key(strike, opt_type, expiry, expiry_api, token) -> str:
-    key, err = _fetch_key(strike, opt_type, expiry_api, token)
+def _get_instrument_key(strike, opt_type, expiry, expiry_api, token,
+                        index: str = "Nifty") -> str:
+    key, err = _fetch_key(strike, opt_type, expiry_api, token, index)
     if err or not key:
-        key = (f"NSE_FO|NIFTY{expiry.strftime('%y')}"
-               f"{expiry.strftime('%m')}{expiry.strftime('%d')}"
-               f"{strike}{opt_type}")
+        cfg = INDEX_CONFIG[index]
+        key = fallback_key(strike, opt_type, expiry,
+                           cfg["exchange"], cfg["key_prefix"])
     return key
 
 
@@ -217,13 +253,14 @@ def _get_ltp(df1: pd.DataFrame) -> float | None:
 #  STEP 1 — MORNING INIT: fetch data + find OPEN HTF traps
 # ==============================================================================
 @st.cache_data(ttl=300)
-def morning_scan(strike, opt_type, expiry_api, expiry_date_str, htf_min, token):
+def morning_scan(strike, opt_type, expiry_api, expiry_date_str, htf_min, token,
+                 index: str = "Nifty"):
     """
     Fetch prev-week + current-week data.
     Return ONLY TRAPPED (open) HTF entries — CLOSED ones are historical, not live.
     """
     expiry = datetime.strptime(expiry_date_str, "%Y-%m-%d").date()
-    key    = _get_instrument_key(strike, opt_type, expiry, expiry_api, token)
+    key    = _get_instrument_key(strike, opt_type, expiry, expiry_api, token, index)
 
     # Prev week Monday to today
     today  = date.today()
@@ -446,8 +483,16 @@ def main():
             st.warning("No token — paste above.")
 
         st.markdown("---")
+        st.markdown("**Index Selection**")
+        index_choice = st.radio(
+            "Track", ["Nifty", "Sensex", "Both"],
+            index=0, horizontal=True,
+        )
+        selected_indices = (["Nifty", "Sensex"] if index_choice == "Both"
+                            else [index_choice])
+
+        st.markdown("---")
         st.markdown("**Settings**")
-        round_step   = st.number_input("Strike round-off", value=100, step=50, min_value=50)
         htf_minutes  = st.number_input("HTF (min)",        value=HTF_MINUTES, step=5, min_value=5)
         ltf_minutes  = st.number_input("LTF (min)",        value=LTF_MINUTES, step=1, min_value=1)
         sl_buffer    = st.number_input("SL Buffer (pts)",  value=DEFAULT_SL_BUFFER, step=0.5)
@@ -482,112 +527,118 @@ def main():
         st.error("Paste your Upstox token in the sidebar to start.")
         st.stop()
 
-    # -- Step 1: Prev-day spot + strikes ---------------------------------------
+    # -- Step 1 + 2: per-index spot + strikes + HTF scan ----------------------
     sec("STEP 1 — Prev-Day Spot + Today's Watch List")
 
-    try:
-        spot = _fetch_spot(token)
-    except Exception as ex:
-        st.error(f"Spot fetch failed: {ex}")
-        st.stop()
+    all_open_traps = {}   # sym -> (open_traps, df1, strike, opt_type)
+    df1_map        = {}   # sym -> df1
 
-    H, L, C = spot["high"], spot["low"], spot["close"]
-    levels   = pivot_levels(H, L, C)
-    s1 = round_n(levels["s1"], round_step)
-    s2 = round_n(levels["s2"], round_step)
-    r1 = round_n(levels["r1"], round_step)
-    r2 = round_n(levels["r2"], round_step)
+    log_header_key = f"log_header_{today_str}"
 
-    expiry     = next_tuesday(date.today())
-    expiry_api = expiry.strftime("%Y-%m-%d")
+    for idx_name in selected_indices:
+        cfg        = INDEX_CONFIG[idx_name]
+        step       = cfg["strike_step"]
+        expiry     = cfg["expiry_fn"](date.today())
+        expiry_api = expiry.strftime("%Y-%m-%d")
+        prefix     = cfg["symbol_prefix"]
+        lbl_idx    = cfg["label"]
 
-    sc = st.columns(6)
-    card(sc[0], "Prev Close",           f"{C:,.2f}",           "blue")
-    card(sc[1], f"S1 CE x{round_step}", f"{s1:,}",             "green")
-    card(sc[2], f"S2 CE x{round_step}", f"{s2:,}",             "green")
-    card(sc[3], f"R1 PE x{round_step}", f"{r1:,}",             "red")
-    card(sc[4], f"R2 PE x{round_step}", f"{r2:,}",             "red")
-    card(sc[5], "Expiry",               expiry.strftime("%d %b %y"), "")
+        try:
+            spot = _fetch_spot(token, idx_name)
+        except Exception as ex:
+            st.error(f"{lbl_idx} spot fetch failed: {ex}")
+            continue
 
-    # Write log header once
-    if not st.session_state.get("log_header_written"):
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"\n{'='*70}\n")
-            f.write(f"SESSION: {now.strftime('%d %b %Y %H:%M:%S')}\n")
-            f.write(f"Prev Close:{C}  S1:{s1} S2:{s2} R1:{r1} R2:{r2}\n")
-            f.write(f"Expiry:{expiry_api}  HTF:{htf_minutes}min LTF:{ltf_minutes}min SL:{sl_buffer}\n")
-            f.write(f"{'='*70}\n")
-        st.session_state["log_header_written"] = True
+        H, L, C = spot["high"], spot["low"], spot["close"]
+        levels   = pivot_levels(H, L, C)
+        s1 = round_n(levels["s1"], step)
+        s2 = round_n(levels["s2"], step)
+        r1 = round_n(levels["r1"], step)
+        r2 = round_n(levels["r2"], step)
 
-    contracts = [
-        (s1, "CE", f"S1 CE {s1:,}"),
-        (s2, "CE", f"S2 CE {s2:,}"),
-        (r1, "PE", f"R1 PE {r1:,}"),
-        (r2, "PE", f"R2 PE {r2:,}"),
-    ]
+        sc = st.columns(6)
+        card(sc[0], f"{lbl_idx} Prev Close",    f"{C:,.2f}",           "blue")
+        card(sc[1], f"S1 CE x{step}",           f"{s1:,}",             "green")
+        card(sc[2], f"S2 CE x{step}",           f"{s2:,}",             "green")
+        card(sc[3], f"R1 PE x{step}",           f"{r1:,}",             "red")
+        card(sc[4], f"R2 PE x{step}",           f"{r2:,}",             "red")
+        card(sc[5], f"{lbl_idx} Expiry",        expiry.strftime("%d %b %y"), "")
 
-    # -- Step 2: HTF scan — OPEN traps only ------------------------------------
-    sec("STEP 2 — Active HTF Zones (OPEN / Waiting for LTF entry)")
+        if not st.session_state.get(log_header_key):
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*70}\n")
+                f.write(f"SESSION: {now.strftime('%d %b %Y %H:%M:%S')}  INDEX:{idx_name}\n")
+                f.write(f"Prev Close:{C}  S1:{s1} S2:{s2} R1:{r1} R2:{r2}\n")
+                f.write(f"Expiry:{expiry_api}  HTF:{htf_minutes}min LTF:{ltf_minutes}min SL:{sl_buffer}\n")
+                f.write(f"{'='*70}\n")
 
-    all_open_traps  = {}   # sym -> list of open htf entries
-    df1_map         = {}   # sym -> df1 (for LTP lookup)
+        contracts = [
+            (s1, "CE", f"{lbl_idx} S1 CE {s1:,}"),
+            (s2, "CE", f"{lbl_idx} S2 CE {s2:,}"),
+            (r1, "PE", f"{lbl_idx} R1 PE {r1:,}"),
+            (r2, "PE", f"{lbl_idx} R2 PE {r2:,}"),
+        ]
 
-    for strike, opt_type, label in contracts:
-        sym = trading_symbol(strike, opt_type, expiry)
+        sec(f"STEP 2 — {lbl_idx} Active HTF Zones (OPEN / Waiting for LTF entry)")
 
-        with st.spinner(f"Loading {label}..."):
-            open_traps, df_events, key, df1, from_date = morning_scan(
-                strike, opt_type, expiry_api, expiry_api,
-                htf_minutes, token,
-            )
+        for strike, opt_type, label in contracts:
+            sym = trading_symbol(strike, opt_type, expiry, prefix)
 
-        df1_map[sym] = df1
+            with st.spinner(f"Loading {label}..."):
+                open_traps, df_events, key, df1, from_date = morning_scan(
+                    strike, opt_type, expiry_api, expiry_api,
+                    htf_minutes, token, idx_name,
+                )
 
-        # Refresh df1 with latest data (TTL=30s for live)
-        if df1 is not None:
-            df1_live, _ = _fetch_data(key, from_date, date.today().strftime("%Y-%m-%d"), token)
-            if df1_live is not None and not df1_live.empty:
-                df1_map[sym]  = df1_live
+            df1_map[sym] = df1
 
-        all_open_traps[sym] = (open_traps, df1_map[sym], strike, opt_type)
+            if df1 is not None:
+                df1_live, _ = _fetch_data(key, from_date,
+                                          date.today().strftime("%Y-%m-%d"), token)
+                if df1_live is not None and not df1_live.empty:
+                    df1_map[sym] = df1_live
 
-        ltp = _get_ltp(df1_map[sym])
+            all_open_traps[sym] = (open_traps, df1_map[sym], strike, opt_type)
+            ltp = _get_ltp(df1_map[sym])
 
-        with st.expander(
-            f"{label}  --  {sym}  |  "
-            f"Open HTF zones: {len(open_traps)}  |  "
-            f"LTP: {f'{ltp:.2f}' if ltp else '--'}",
-            expanded=len(open_traps) > 0,
-        ):
-            if open_traps:
-                rows = []
-                for e in open_traps:
-                    rows.append({
-                        "HTF Trap Bar"  : pd.Timestamp(e["trapped_on"]).strftime("%d %b %y %H:%M"),
-                        "HTF Ref Bar"   : pd.Timestamp(e["ref_ts"]).strftime("%d %b %y %H:%M"),
-                        "Zone HIGH"     : round(e["zone_high"], 2),
-                        "Zone LOW"      : round(e["zone_low"], 2),
-                        "1/3 Trigger"   : round(e["zone_trigger"], 2),
-                        "Target (BearSL)": round(e["sl"], 2),
-                    })
-                df_open = pd.DataFrame(rows)
-                st.dataframe(df_open, width="stretch",
-                             height=min(42 * len(df_open) + 50, 250), hide_index=True)
+            with st.expander(
+                f"{label}  --  {sym}  |  "
+                f"Open HTF zones: {len(open_traps)}  |  "
+                f"LTP: {f'{ltp:.2f}' if ltp else '--'}",
+                expanded=len(open_traps) > 0,
+            ):
+                if open_traps:
+                    rows = []
+                    for e in open_traps:
+                        rows.append({
+                            "HTF Trap Bar"   : pd.Timestamp(e["trapped_on"]).strftime("%d %b %y %H:%M"),
+                            "HTF Ref Bar"    : pd.Timestamp(e["ref_ts"]).strftime("%d %b %y %H:%M"),
+                            "Zone HIGH"      : round(e["zone_high"], 2),
+                            "Zone LOW"       : round(e["zone_low"], 2),
+                            "1/3 Trigger"    : round(e["zone_trigger"], 2),
+                            "Target (BearSL)": round(e["sl"], 2),
+                        })
+                    df_open = pd.DataFrame(rows)
+                    st.dataframe(df_open, width="stretch",
+                                 height=min(42 * len(df_open) + 50, 250), hide_index=True)
 
-                for e in open_traps:
-                    st.markdown(
-                        f'<div class="zone-box">'
-                        f'WATCH ZONE | High: <b>{e["zone_high"]:.2f}</b>  '
-                        f'Low: <b>{e["zone_low"]:.2f}</b>  '
-                        f'Enter LTF scan when price &lt; <b>{e["zone_trigger"]:.2f}</b>  |  '
-                        f'Target: <b>{e["sl"]:.2f}</b></div>',
-                        unsafe_allow_html=True,
-                    )
-            else:
-                if not df_events.empty:
-                    st.info("All HTF traps are CLOSED (historical). No open zones to watch today.")
+                    for e in open_traps:
+                        st.markdown(
+                            f'<div class="zone-box">'
+                            f'<b>{sym}</b> | WATCH ZONE | '
+                            f'High: <b>{e["zone_high"]:.2f}</b>  '
+                            f'Low: <b>{e["zone_low"]:.2f}</b>  '
+                            f'Enter LTF scan when price &lt; <b>{e["zone_trigger"]:.2f}</b>  |  '
+                            f'Target: <b>{e["sl"]:.2f}</b></div>',
+                            unsafe_allow_html=True,
+                        )
                 else:
-                    st.info(f"No HTF traps found for {sym} in prev+current week.")
+                    if not df_events.empty:
+                        st.info(f"All {sym} HTF traps are CLOSED (historical). No open zones today.")
+                    else:
+                        st.info(f"No HTF traps found for {sym} in prev+current week.")
+
+    st.session_state[log_header_key] = True
 
     # -- Step 3: Live LTF scan -------------------------------------------------
     sec("STEP 3 — Live LTF Alerts + Entry Signals")

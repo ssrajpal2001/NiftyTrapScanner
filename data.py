@@ -13,15 +13,27 @@ def url_encode(key: str) -> str:
     return key.replace("|", "%7C").replace(" ", "%20")
 
 
-def fetch_spot_prev_day(headers: dict) -> dict:
+SPOT_KEYS = {
+    "Nifty":  "NSE_INDEX%7CNifty%2050",
+    "Sensex": "BSE_INDEX%7CSENSEX",
+}
+
+OPTION_CHAIN_KEYS = {
+    "Nifty":  "NSE_INDEX%7CNifty%2050",
+    "Sensex": "BSE_INDEX%7CSENSEX",
+}
+
+
+def fetch_spot_prev_day(headers: dict, index: str = "Nifty") -> dict:
     """
-    Returns the last COMPLETED trading day's OHLC for Nifty 50.
+    Returns the last COMPLETED trading day's OHLC for the given index.
     Picks the most recent candle strictly before today — handles holidays/weekends.
     """
+    spot_key  = SPOT_KEYS.get(index, SPOT_KEYS["Nifty"])
     today_str = datetime.today().strftime("%Y-%m-%d")
     from_str  = (datetime.today() - timedelta(days=14)).strftime("%Y-%m-%d")
     url = (f"{UPSTOX_BASE}/historical-candle/"
-           f"NSE_INDEX%7CNifty%2050/day/{today_str}/{from_str}")
+           f"{spot_key}/day/{today_str}/{from_str}")
     r    = requests.get(url, headers=headers, timeout=15)
     body = r.json()
     if body.get("status") != "success":
@@ -44,15 +56,16 @@ def fetch_spot_prev_day(headers: dict) -> dict:
     }
 
 
-def fetch_spot_for_date(target_date: str, headers: dict) -> dict | None:
+def fetch_spot_for_date(target_date: str, headers: dict, index: str = "Nifty") -> dict | None:
     """
-    Returns the prev trading day's OHLC for Nifty 50 relative to target_date.
+    Returns the prev trading day's OHLC for the given index relative to target_date.
     target_date: 'YYYY-MM-DD'
     """
+    spot_key = SPOT_KEYS.get(index, SPOT_KEYS["Nifty"])
     td   = datetime.strptime(target_date, "%Y-%m-%d")
     from_str = (td - timedelta(days=14)).strftime("%Y-%m-%d")
     url  = (f"{UPSTOX_BASE}/historical-candle/"
-            f"NSE_INDEX%7CNifty%2050/day/{target_date}/{from_str}")
+            f"{spot_key}/day/{target_date}/{from_str}")
     r    = requests.get(url, headers=headers, timeout=15)
     body = r.json()
     if body.get("status") != "success":
@@ -79,10 +92,11 @@ def fetch_spot_for_date(target_date: str, headers: dict) -> dict | None:
 
 
 def get_instrument_key(strike: int, opt_type: str, expiry_str: str,
-                       headers: dict) -> tuple:
+                       headers: dict, index: str = "Nifty") -> tuple:
     """Returns (instrument_key, error_or_None)."""
+    chain_key = OPTION_CHAIN_KEYS.get(index, OPTION_CHAIN_KEYS["Nifty"])
     url  = (f"{UPSTOX_BASE}/option/chain"
-            f"?instrument_key=NSE_INDEX%7CNifty%2050&expiry_date={expiry_str}")
+            f"?instrument_key={chain_key}&expiry_date={expiry_str}")
     r    = requests.get(url, headers=headers, timeout=15)
     body = r.json()
     if body.get("status") != "success":
