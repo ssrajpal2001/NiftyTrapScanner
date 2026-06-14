@@ -92,33 +92,39 @@ def scan_htf(df: pd.DataFrame) -> tuple:
 
 # ── LTF (5-min) scan inside an HTF zone ───────────────────────────────────────
 
-def scan_ltf(df: pd.DataFrame, htf_zone_high: float, htf_zone_low: float) -> tuple:
+def scan_ltf(df: pd.DataFrame,
+             htf_zone_high: float,
+             htf_zone_low: float,
+             htf_ref_bar: str = "",
+             htf_trap_bar: str = "",
+             htf_target: float = 0.0) -> tuple:
     """
     Scan 5-min bars for a bearish trap INSIDE the HTF zone band.
-    Only considers bars whose price is within [htf_zone_low, htf_zone_high].
+    Tags every LTF entry dict with its parent HTF trap for full traceability.
 
-    Returns same structure as scan_htf:
-        events   : pd.DataFrame
-        entries  : list[dict]
-
-    LTF Zone:
-        LTF Zone HIGH = LTF Ref Bar LOW   (where 5-min bears entered)
-        LTF Zone LOW  = LTF Next Bar LOW  (next bar after LTF ref bar)
-        LTF Trigger   = LTF Zone LOW + (LTF Zone HIGH - LTF Zone LOW) / 3  ← your entry
-        SL            = htf_zone_low - buffer   (handled in backtest, not here)
-        Target        = htf SL Level            (also passed in backtest)
+    Extra keys added to each entry:
+        htf_ref_bar, htf_trap_bar, htf_zone_high, htf_zone_low, htf_target
     """
-    # Only work with bars that are inside or near the HTF zone
     zone_df = df[
         (df["low"]  <= htf_zone_high) &
-        (df["close"] >= htf_zone_low * 0.95)   # 5% tolerance below zone low
+        (df["close"] >= htf_zone_low * 0.95)
     ].copy()
 
     if len(zone_df) < 2:
         return pd.DataFrame(), []
 
     zone_df = zone_df.reset_index(drop=True)
-    return scan_htf(zone_df)   # same algorithm, just on filtered 5-min bars
+    df_events, entries = scan_htf(zone_df)
+
+    # Tag each LTF entry with parent HTF trap metadata
+    for e in entries:
+        e["htf_ref_bar"]   = htf_ref_bar
+        e["htf_trap_bar"]  = htf_trap_bar
+        e["htf_zone_high"] = htf_zone_high
+        e["htf_zone_low"]  = htf_zone_low
+        e["htf_target"]    = htf_target
+
+    return df_events, entries
 
 
 # ── Intraday backtest ──────────────────────────────────────────────────────────
@@ -194,16 +200,30 @@ def backtest(df: pd.DataFrame,
 
         pnl = round((exit_price - entry_price) * units, 2)
 
+        # HTF parent trap metadata (populated by scan_ltf tagging)
+        htf_ref  = e.get("htf_ref_bar",   "—")
+        htf_trap = e.get("htf_trap_bar",  "—")
+        htf_zh   = e.get("htf_zone_high", "—")
+        htf_zl   = e.get("htf_zone_low",  "—")
+        htf_tgt  = e.get("htf_target",    target)
+
         trades.append({
-            "Date"       : entry_date.strftime("%d %b %y"),
-            "Entry Time" : entry_ts.strftime("%H:%M"),
-            "Exit Time"  : exit_ts.strftime("%H:%M") if hasattr(exit_ts, "strftime") else str(exit_ts),
-            "Entry"      : entry_price,
-            "Target"     : target,
-            "SL"         : sl_price,
-            "Exit Price" : exit_price,
-            "Exit"       : exit_reason,
-            "P&L (₹)"   : pnl,
+            # ── HTF parent trap (for traceability) ────────────────────────────
+            "HTF Ref Bar"    : htf_ref,
+            "HTF Trap Bar"   : htf_trap,
+            "HTF Zone High"  : htf_zh,
+            "HTF Zone Low"   : htf_zl,
+            "HTF Target"     : htf_tgt,
+            # ── LTF trade ─────────────────────────────────────────────────────
+            "LTF Date"       : entry_date.strftime("%d %b %y"),
+            "LTF Entry Time" : entry_ts.strftime("%H:%M"),
+            "LTF Exit Time"  : exit_ts.strftime("%H:%M") if hasattr(exit_ts, "strftime") else str(exit_ts),
+            "LTF Entry"      : entry_price,
+            "LTF Target"     : target,
+            "LTF SL"         : sl_price,
+            "LTF Exit Price" : exit_price,
+            "Exit"           : exit_reason,
+            "P&L (₹)"       : pnl,
         })
 
     df_trades = pd.DataFrame(trades)

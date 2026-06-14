@@ -157,10 +157,19 @@ def render_backtest_table(df_trades: pd.DataFrame, summary: dict):
                 "SL":     f"color:{CLR_RED};font-weight:bold;",
                 "SQUAREOFF": f"color:{CLR_MUTED};"}.get(v, "")
 
+    # Column order: HTF parent context first, then LTF trade details
+    htf_cols = ["HTF Ref Bar", "HTF Trap Bar", "HTF Zone High", "HTF Zone Low", "HTF Target"]
+    ltf_cols = ["LTF Date", "LTF Entry Time", "LTF Exit Time",
+                "LTF Entry", "LTF Target", "LTF SL", "LTF Exit Price",
+                "Exit", "P&L (₹)", "Cumulative P&L"]
+    show_cols = [c for c in htf_cols + ltf_cols if c in df_trades.columns]
+
     st.dataframe(
-        df_trades.style.map(pnl_clr, subset=["P&L (₹)"]).map(exit_clr, subset=["Exit"]),
+        df_trades[show_cols].style
+            .map(pnl_clr,  subset=["P&L (₹)"])
+            .map(exit_clr, subset=["Exit"]),
         use_container_width=True,
-        height=min(40 * len(df_trades) + 40, 420),
+        height=min(42 * len(df_trades) + 50, 500),
         hide_index=True,
     )
 
@@ -280,7 +289,15 @@ def scan_one_contract(label, strike, opt_type, cls,
             st.caption("  No LTF bars.")
             continue
 
-        df_ltf_events, ltf_entries = scan_ltf(df_ltf, zh, zl)
+        htf_ref_label  = htf_e["ref_ts"].strftime("%d %b %y %H:%M")  if htf_e.get("ref_ts")      else "—"
+        htf_trap_label = htf_e["trapped_on"].strftime("%d %b %y %H:%M") if htf_e.get("trapped_on") else "—"
+
+        df_ltf_events, ltf_entries = scan_ltf(
+            df_ltf, zh, zl,
+            htf_ref_bar  = htf_ref_label,
+            htf_trap_bar = htf_trap_label,
+            htf_target   = tgt,
+        )
         ltf_closed = [e for e in ltf_entries if e["status"] == "CLOSED"]
 
         if df_ltf_events.empty:
