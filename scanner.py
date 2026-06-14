@@ -160,7 +160,8 @@ def backtest(df: pd.DataFrame,
             continue
 
         entry_price = round(e["zone_trigger"], 2)
-        target      = round(htf_target_map.get(e["closed_on"], e["sl"]) if htf_target_map else e["sl"], 2)
+        # Use htf_target tagged by scan_ltf; fall back to own SL for single-TF backtest
+        target      = round(e.get("htf_target") or e["sl"], 2)
         sl_price    = round(e["zone_low"] - buffer, 2)
         entry_ts    = pd.Timestamp(e["closed_on"])
         entry_date  = entry_ts.date()
