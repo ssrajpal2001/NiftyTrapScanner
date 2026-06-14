@@ -235,6 +235,111 @@ def backtest(df: pd.DataFrame,
     return df_trades
 
 
+def backtest_phase3(df_active: pd.DataFrame,
+                    active_entries: list,
+                    counterpart_entries: list,
+                    qty: int = DEFAULT_QTY,
+                    lot_size: int = DEFAULT_LOT_SIZE) -> pd.DataFrame:
+    """
+    Phase 3 backtest with cross-pair SL/target rules:
+      SL     = when counterpart LTF entry fires (counterpart closed_on timestamp)
+      Target = htf_target on active side (HTF ref bar HIGH)
+
+    Only ONE side trade is active at a time — counterpart entry = active SL.
+    """
+    units = qty * lot_size
+
+    # Build sorted list of counterpart entry timestamps
+    cp_times = sorted([
+        pd.Timestamp(e["closed_on"])
+        for e in counterpart_entries
+        if e.get("closed_on") and e["status"] in ("CLOSED", "TRAPPED")
+    ])
+
+    trades = []
+    for e in active_entries:
+        if e["status"] not in ("TRAPPED", "CLOSED") or not e.get("closed_on"):
+            continue
+
+        entry_price = round(e["entry"], 2)
+        target      = round(e.get("htf_target") or e["sl"], 2)
+        entry_ts    = pd.Timestamp(e["closed_on"])
+        entry_date  = entry_ts.date()
+
+        # Next counterpart entry strictly after our entry = SL trigger
+        next_cp_ts = next((t for t in cp_times if t > entry_ts), None)
+
+        # Find the counterpart entry price at that timestamp (exit price for SL)
+        cp_exit_price = None
+        if next_cp_ts:
+            match = next((x for x in counterpart_entries
+                          if x.get("closed_on") and
+                          pd.Timestamp(x["closed_on"]) == next_cp_ts), None)
+            cp_exit_price = round(match["entry"], 2) if match else None
+
+        future = df_active[
+            (df_active["datetime"] > entry_ts) &
+            (df_active["datetime"].dt.date == entry_date)
+        ]
+
+        exit_price  = None
+        exit_reason = None
+        exit_ts     = None
+
+        for _, bar in future.iterrows():
+            bar_ts = pd.Timestamp(bar["datetime"])
+
+            # SL fires when counterpart entry bar is reached
+            if next_cp_ts and bar_ts >= next_cp_ts:
+                exit_price  = cp_exit_price if cp_exit_price else round(bar["close"], 2)
+                exit_reason = "SL"
+                exit_ts     = next_cp_ts
+                break
+
+            if bar["high"] >= target:
+                exit_price  = target
+                exit_reason = "TARGET"
+                exit_ts     = bar_ts
+                break
+
+        if exit_price is None:
+            ref = future.iloc[-1] if len(future) > 0 else None
+            if ref is None:
+                rows = df_active[df_active["datetime"] == entry_ts]
+                ref  = rows.iloc[0] if len(rows) > 0 else None
+            if ref is None:
+                continue
+            exit_price  = round(ref["close"], 2)
+            exit_reason = "SQUAREOFF"
+            exit_ts     = ref["datetime"]
+
+        pnl = round((exit_price - entry_price) * units, 2)
+
+        sl_label = (next_cp_ts.strftime("%H:%M") if next_cp_ts else "none")
+        trades.append({
+            "HTF Ref Bar"    : e.get("htf_ref_bar",   "—"),
+            "HTF Trap Bar"   : e.get("htf_trap_bar",  "—"),
+            "HTF Zone High"  : e.get("htf_zone_high", "—"),
+            "HTF Zone Low"   : e.get("htf_zone_low",  "—"),
+            "HTF Target"     : round(e.get("htf_target", target), 2),
+            "LTF Date"       : entry_date.strftime("%d %b %y"),
+            "LTF Entry Time" : entry_ts.strftime("%H:%M"),
+            "LTF Exit Time"  : exit_ts.strftime("%H:%M") if hasattr(exit_ts, "strftime") else str(exit_ts),
+            "LTF Entry"      : entry_price,
+            "LTF Zone Low"   : round(e["zone_low"], 2),
+            "LTF Target"     : target,
+            "CP SL Trigger"  : sl_label,
+            "LTF Exit Price" : exit_price,
+            "Exit"           : exit_reason,
+            "P&L (Rs)"       : pnl,
+        })
+
+    df_out = pd.DataFrame(trades)
+    if not df_out.empty:
+        df_out["Cumulative P&L"] = df_out["P&L (Rs)"].cumsum().round(2)
+    return df_out
+
+
 def trade_summary(df_trades: pd.DataFrame) -> dict:
     """Compute summary stats from a backtest trades DataFrame."""
     if df_trades.empty:

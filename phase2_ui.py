@@ -14,10 +14,18 @@ Flow:
   8. SL = LTF Zone LOW - buffer  |  Target = HTF bears' SL level
 """
 
+import os
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, date
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass
 
 from config import (
     HTF_MINUTES, LTF_MINUTES,
@@ -28,7 +36,7 @@ from data import (
     fetch_spot_prev_day, fetch_spot_for_date, get_instrument_key, fetch_1min,
     resample_tf, pivot_levels,
 )
-from scanner import scan_htf, scan_ltf, backtest, trade_summary
+from scanner import scan_htf, scan_ltf, backtest, backtest_phase3, trade_summary
 
 st.set_page_config(
     page_title="Trap Scanner - Phase 2",
@@ -86,6 +94,9 @@ def _get_token() -> str:
             return t
     except Exception:
         pass
+    env_t = os.environ.get("UPSTOX_TOKEN", "")
+    if env_t:
+        return env_t
     return _FALLBACK_TOKEN
 
 
@@ -131,6 +142,56 @@ def _fetch_key(strike, opt_type, expiry_str, token):
 def _fetch_1min(key, from_date, to_date, token):
     h = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     return fetch_1min(key, from_date, to_date, h)
+
+
+@st.cache_data(ttl=120)
+def _scan_result(strike, opt_type, expiry_api, from_date, to_date,
+                 htf_min, ltf_min, token):
+    """
+    Returns (selected_ltf_entries, df_ltf) for Phase 3 cross-pair analysis.
+    Reuses cached _fetch_1min so no extra API calls.
+    """
+    expiry = datetime.strptime(expiry_api, "%Y-%m-%d").date()
+    h = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    key, err = get_instrument_key(strike, opt_type, expiry_api, h)
+    if err or not key:
+        key = (f"NSE_FO|NIFTY{expiry.strftime('%y')}"
+               f"{expiry.strftime('%m')}{expiry.strftime('%d')}"
+               f"{strike}{opt_type}")
+
+    df1, err1 = _fetch_1min(key, from_date, to_date, token)
+    if err1 or df1 is None or df1.empty:
+        return [], pd.DataFrame()
+
+    df_htf = resample_tf(df1, htf_min)
+    if df_htf.empty:
+        return [], pd.DataFrame()
+
+    _, htf_entries = scan_htf(df_htf)
+    htf_trapped = [e for e in htf_entries if e["status"] in ("TRAPPED", "CLOSED")]
+
+    df_ltf = resample_tf(df1, ltf_min)
+    if df_ltf.empty or not htf_trapped:
+        return [], df_ltf
+
+    selected = []
+    for htf_e in htf_trapped:
+        zh, zl, tgt  = htf_e["zone_high"], htf_e["zone_low"], htf_e["sl"]
+        trap_ts       = pd.Timestamp(htf_e["trapped_on"])
+        htf_ref_lbl   = pd.Timestamp(htf_e["ref_ts"]).strftime("%d %b %y %H:%M")
+        htf_trap_lbl  = trap_ts.strftime("%d %b %y %H:%M")
+        df_after      = df_ltf[df_ltf["datetime"] >= trap_ts].copy().reset_index(drop=True)
+        if len(df_after) < 2:
+            continue
+        _, ltf_entries = scan_ltf(df_after, zh, zl,
+                                   htf_ref_bar=htf_ref_lbl,
+                                   htf_trap_bar=htf_trap_lbl,
+                                   htf_target=tgt)
+        closed = [x for x in ltf_entries if x["status"] == "CLOSED"]
+        if closed:
+            selected.append(min(closed, key=lambda x: x["zone_low"]))
+
+    return selected, df_ltf
 
 
 # ==============================================================================
@@ -819,6 +880,66 @@ def main():
                                   expiry, expiry_api, from_date, to_date,
                                   htf_minutes, ltf_minutes,
                                   sl_buffer, round_step, token)
+
+        # -- Phase 3: Paired SL/Target analysis --------------------------------
+        st.markdown("---")
+        sec("PHASE 3 — Paired Trade Analysis  (S1 CE ↔ R1 PE  |  S2 CE ↔ R2 PE)")
+        st.caption("SL = counterpart LTF entry fires  |  Target = same-side HTF ref bar HIGH")
+
+        pairs_p3 = [
+            ("Pair 1  S1 CE ↔ R1 PE", s1, "CE", r1, "PE"),
+            ("Pair 2  S2 CE ↔ R2 PE", s2, "CE", r2, "PE"),
+        ]
+
+        for pair_lbl, ce_strike, ce_type, pe_strike, pe_type in pairs_p3:
+            st.markdown(f"#### {pair_lbl}")
+
+            ce_sel, ce_ltf = _scan_result(ce_strike, ce_type, expiry_api,
+                                           from_date, to_date,
+                                           htf_minutes, ltf_minutes, token)
+            pe_sel, pe_ltf = _scan_result(pe_strike, pe_type, expiry_api,
+                                           from_date, to_date,
+                                           htf_minutes, ltf_minutes, token)
+
+            ce_sym = trading_symbol(ce_strike, ce_type, expiry)
+            pe_sym = trading_symbol(pe_strike, pe_type, expiry)
+
+            col1, col2 = st.columns(2)
+            col1.caption(f"CE ({ce_sym}): {len(ce_sel)} entries")
+            col2.caption(f"PE ({pe_sym}): {len(pe_sel)} entries")
+
+            if not ce_sel and not pe_sel:
+                st.info("No entries fired on either side for this pair.")
+                continue
+
+            # Run Phase 3 backtest for each active side
+            all_p3_trades = []
+
+            if ce_sel and not ce_ltf.empty:
+                df_ce = backtest_phase3(ce_ltf, ce_sel, pe_sel,
+                                        qty=DEFAULT_QTY, lot_size=DEFAULT_LOT_SIZE)
+                if not df_ce.empty:
+                    df_ce.insert(0, "Side", "CE")
+                    all_p3_trades.append(df_ce)
+
+            if pe_sel and not pe_ltf.empty:
+                df_pe = backtest_phase3(pe_ltf, pe_sel, ce_sel,
+                                        qty=DEFAULT_QTY, lot_size=DEFAULT_LOT_SIZE)
+                if not df_pe.empty:
+                    df_pe.insert(0, "Side", "PE")
+                    all_p3_trades.append(df_pe)
+
+            if not all_p3_trades:
+                st.info("No Phase 3 trades to show for this pair.")
+                continue
+
+            combined_p3 = pd.concat(all_p3_trades, ignore_index=True)
+            if "Cumulative P&L" in combined_p3.columns:
+                combined_p3 = combined_p3.drop(columns=["Cumulative P&L"])
+            combined_p3 = combined_p3.sort_values("LTF Date").reset_index(drop=True)
+            combined_p3["Cumulative P&L"] = combined_p3["P&L (Rs)"].cumsum().round(2)
+
+            render_full_report(combined_p3, title=f"Phase 3 Report — {pair_lbl}")
 
     # ==========================================================================
     #  TAB 2 — DATE RANGE BACKTEST
