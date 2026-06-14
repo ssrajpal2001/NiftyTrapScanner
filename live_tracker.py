@@ -490,6 +490,143 @@ def render_live_pnl(entry_hits: list, df1_map: dict, log_path: Path):
 # ==============================================================================
 #  MAIN
 # ==============================================================================
+def _render_pair_phase3(pair_label, ce_sym, pe_sym,
+                        ltf_results: dict, df1_map: dict, log_path: Path):
+    """
+    Phase 3 paired display.
+    SL   = counterpart entry fires (other side's LTF ref bar LOW hit)
+    Target = same side HTF ref bar HIGH (already in setup["target"])
+    Only one side trade is active at a time.
+    """
+    ce_entries, ce_alerts = ltf_results.get(ce_sym, ([], []))
+    pe_entries, pe_alerts = ltf_results.get(pe_sym, ([], []))
+
+    ce_hit = bool(ce_entries)
+    pe_hit = bool(pe_entries)
+
+    st.markdown(
+        f'<div class="zone-box" style="border-left:4px solid #0969DA; margin-bottom:6px;">'
+        f'<b>{pair_label}</b> &nbsp;|&nbsp; CE: <b>{ce_sym}</b> &nbsp;↔&nbsp; PE: <b>{pe_sym}</b>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # -- Neither side fired ---------------------------------------------------
+    if not ce_hit and not pe_hit:
+        col1, col2 = st.columns(2)
+        with col1:
+            if ce_alerts:
+                w = ce_alerts[0]["entry_price"]
+                st.markdown(
+                    f'<div class="alert-orange">CE WATCH: {ce_sym} — '
+                    f'Bears trapped. Retest entry @ <b>{w:.2f}</b></div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.caption(f"CE {ce_sym}: No entry yet")
+        with col2:
+            if pe_alerts:
+                w = pe_alerts[0]["entry_price"]
+                st.markdown(
+                    f'<div class="alert-orange">PE WATCH: {pe_sym} — '
+                    f'Bears trapped. Retest entry @ <b>{w:.2f}</b></div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.caption(f"PE {pe_sym}: No entry yet")
+        return
+
+    # -- Determine active side ------------------------------------------------
+    # If both fired, the LATER entry is the active trade
+    # (the earlier one's SL was hit when the counterpart fired)
+    if ce_hit and pe_hit:
+        ce_ts = pd.Timestamp(ce_entries[0]["entry_ts"])
+        pe_ts = pd.Timestamp(pe_entries[0]["entry_ts"])
+        if pe_ts >= ce_ts:
+            active_side  = "PE"
+            active       = pe_entries[0]
+            sl_side      = "CE"
+            sl_entry_ts  = ce_ts
+        else:
+            active_side  = "CE"
+            active       = ce_entries[0]
+            sl_side      = "PE"
+            sl_entry_ts  = pe_ts
+        sl_was_hit = True
+        log_event(log_path, "PAIR_SL",
+                  f"{pair_label}: {sl_side} entry @ {sl_entry_ts} → "
+                  f"SL triggered on prev {active_side} trade. Now tracking {active_side}.")
+    elif ce_hit:
+        active_side = "CE"
+        active      = ce_entries[0]
+        sl_was_hit  = False
+    else:
+        active_side = "PE"
+        active      = pe_entries[0]
+        sl_was_hit  = False
+
+    # SL watch level = counterpart's pending entry price (if bears trapped on that side)
+    counterpart_alerts = pe_alerts if active_side == "CE" else ce_alerts
+    sl_watch_price = counterpart_alerts[0]["entry_price"] if counterpart_alerts else None
+    sl_watch_sym   = pe_sym if active_side == "CE" else ce_sym
+
+    # LTP + P&L
+    sym    = active["sym"]
+    df1    = df1_map.get(sym)
+    ltp    = _get_ltp(df1)
+    entry  = active["entry_price"]
+    target = active["target"]   # HTF ref bar HIGH on active side
+    units  = DEFAULT_QTY * DEFAULT_LOT_SIZE
+
+    if ltp is not None:
+        pnl      = round((ltp - entry) * units, 2)
+        pnl_str  = f"+Rs.{pnl:,.0f}" if pnl >= 0 else f"-Rs.{abs(pnl):,.0f}"
+        pnl_cls  = "green" if pnl >= 0 else "red"
+        tgt_dist = round(target - ltp, 2)
+    else:
+        pnl_str  = "Awaiting feed"
+        pnl_cls  = "orange"
+        tgt_dist = "--"
+
+    target_hit = ltp is not None and ltp >= target
+
+    # Metric cards
+    side_cls = "green" if active_side == "CE" else "red"
+    cols = st.columns(7)
+    card(cols[0], "Active Side", active_side,                          side_cls)
+    card(cols[1], "Contract",    sym,                                  "blue")
+    card(cols[2], "Entry",       f"{entry:.2f}",                       "")
+    card(cols[3], "LTP",         f"{ltp:.2f}" if ltp else "--",        "blue")
+    card(cols[4], "P&L",         pnl_str,                              pnl_cls)
+    card(cols[5], "Target",      f"{target:.2f}",                      "green")
+    card(cols[6], "SL Trigger",
+         f"{sl_watch_sym} @ {sl_watch_price:.2f}" if sl_watch_price else f"{sl_watch_sym} entry",
+         "orange")
+
+    # Status banner
+    if target_hit:
+        msg = (f"TARGET HIT: {sym} | Entry {entry:.2f} → LTP {ltp:.2f} | "
+               f"Target {target:.2f} | P&L {pnl_str}")
+        st.markdown(f'<div class="alert-green">{msg}</div>', unsafe_allow_html=True)
+        log_event(log_path, "TARGET_HIT", msg)
+        browser_notify(f"TARGET: {sym}", msg)
+    else:
+        sl_label = (f"SL fires if {sl_watch_sym} entry triggers"
+                    + (f" @ {sl_watch_price:.2f}" if sl_watch_price else ""))
+        st.markdown(
+            f'<div class="alert-green">ACTIVE {active_side}: {sym} | '
+            f'Entry {entry:.2f} | LTP {ltp:.2f if ltp else "--"} | P&L {pnl_str} | '
+            f'Target {target:.2f} | {sl_label}</div>',
+            unsafe_allow_html=True,
+        )
+
+    if sl_was_hit:
+        st.warning(
+            f"Note: {sl_side} entry fired earlier → SL triggered on prior {active_side} trade. "
+            f"Now tracking new {active_side} entry."
+        )
+
+
 def main():
     today_str = date.today().strftime("%Y%m%d")
     log_path  = LOG_DIR / f"live_{today_str}.txt"
@@ -570,6 +707,7 @@ def main():
 
     all_open_traps = {}   # sym -> (open_traps, df1, strike, opt_type)
     df1_map        = {}   # sym -> df1
+    idx_pairs      = []   # list of {label, ce_sym, pe_sym} for Phase 3
 
     log_header_key = f"log_header_{today_str}"
 
@@ -633,6 +771,17 @@ def main():
             (r1, "PE", f"{lbl_idx} R1 PE {r1:,}"),
             (r2, "PE", f"{lbl_idx} R2 PE {r2:,}"),
         ]
+        # Paired: S1 CE ↔ R1 PE,  S2 CE ↔ R2 PE
+        idx_pairs.append({
+            "label"   : f"{lbl_idx} Pair 1 — S1/R1",
+            "ce_sym"  : trading_symbol(s1, "CE", expiry, prefix),
+            "pe_sym"  : trading_symbol(r1, "PE", expiry, prefix),
+        })
+        idx_pairs.append({
+            "label"   : f"{lbl_idx} Pair 2 — S2/R2",
+            "ce_sym"  : trading_symbol(s2, "CE", expiry, prefix),
+            "pe_sym"  : trading_symbol(r2, "PE", expiry, prefix),
+        })
 
         sec(f"STEP 2 — {lbl_idx} Active HTF Zones (OPEN / Waiting for LTF entry)")
 
@@ -702,40 +851,49 @@ def main():
 
     st.session_state[log_header_key] = True
 
-    # -- Step 3: Live LTF scan -------------------------------------------------
-    sec("STEP 3 — Live LTF Alerts + Entry Signals")
-
-    all_entry_hits = []
-    all_ltf_alerts = []
+    # -- Step 3: LTF scan — collect results per sym ----------------------------
+    sec("STEP 3 — Live LTF Scan")
 
     log_event(log_path, "SCAN", f"Refresh at {now.strftime('%H:%M:%S')}")
 
+    ltf_results = {}   # sym -> (entry_hits, ltf_alerts)
+
     for sym, (open_traps, df1, strike, opt_type) in all_open_traps.items():
         if not open_traps or df1 is None:
+            ltf_results[sym] = ([], [])
             continue
         entry_hits, ltf_alerts = live_ltf_scan(
             open_traps, df1, ltf_minutes, sl_buffer, sym, log_path
         )
-        all_entry_hits.extend(entry_hits)
-        all_ltf_alerts.extend(ltf_alerts)
+        ltf_results[sym] = (entry_hits, ltf_alerts)
 
-    # Orange alerts — LTF bears trapped, waiting for retest
-    if all_ltf_alerts:
-        for s in all_ltf_alerts:
+        # Show orange alerts (LTF bears trapped, waiting for retest)
+        for s in ltf_alerts:
             st.markdown(
                 f'<div class="alert-orange">'
-                f'ALERT: {s["sym"]} | 5-min bears TRAPPED @ bear SL {s["ltf_bear_sl"]:.2f} | '
-                f'WATCH: price returns to {s["entry_price"]:.2f} (LTF Ref Bar LOW) | '
-                f'SL: {s["sl"]:.2f} | Target: {s["target"]:.2f} | '
-                f'HTF Zone: {s["htf_zone_high"]:.2f} - {s["htf_zone_low"]:.2f}</div>',
+                f'ALERT: {s["sym"]} | Bears TRAPPED @ {s["ltf_bear_sl"]:.2f} | '
+                f'WATCH retest to <b>{s["entry_price"]:.2f}</b> | '
+                f'Target: {s["target"]:.2f} | '
+                f'HTF Zone: {s["htf_zone_high"]:.2f}–{s["htf_zone_low"]:.2f}</div>',
                 unsafe_allow_html=True,
             )
             st.toast(f"ALERT {s['sym']}: Watch {s['entry_price']:.2f}", icon="!")
-    elif not all_entry_hits:
+
+    has_any_signal = any(
+        bool(e) or bool(a)
+        for e, a in ltf_results.values()
+    )
+    if not has_any_signal:
         st.info("No LTF setups triggered yet. Monitoring open HTF zones.")
 
-    # -- Step 4: Live P&L for active trades ------------------------------------
-    render_live_pnl(all_entry_hits, df1_map, log_path)
+    # -- Step 4: Phase 3 — Paired Trade Status (SL + Target) -------------------
+    sec("STEP 4 — Phase 3: Paired Trade Status")
+
+    for pair in idx_pairs:
+        _render_pair_phase3(
+            pair["label"], pair["ce_sym"], pair["pe_sym"],
+            ltf_results, df1_map, log_path,
+        )
 
     # -- Live log tail ---------------------------------------------------------
     sec("Today's Event Log")
