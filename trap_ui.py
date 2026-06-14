@@ -236,19 +236,29 @@ def resample_tf(df_1min: pd.DataFrame, minutes: int) -> pd.DataFrame:
 
 def scan_75min(df75: pd.DataFrame):
     """
-    BEARISH TRAP only on 75-min option bars.
+    BEARISH TRAP with ZONE logic on any-timeframe bars.
 
-    Rule: curr LOW < prev LOW
-      → BEAR entry at prev LOW, SL at prev HIGH
-      → BEARS TRAPPED when future HIGH > SL
-      → BEARS CLOSED when future LOW <= entry (0-loss exit)
+    ENTRY:  curr LOW < prev LOW
+              → Bear entered at prev LOW (entry_level), SL at prev HIGH
+
+    TRAP:   future bar HIGH > SL
+              → Bears stopped out
+              → ZONE defined:
+                  Zone HIGH    = entry_level        (Ref Bar LOW = where bears entered)
+                  Zone LOW     = Trap Bar LOW       (candle that hit SL)
+                  Zone Trigger = Zone LOW + (Zone HIGH - Zone LOW) / 3  ← 1/3 from bottom
+
+    CLOSED: after TRAPPED, any future bar LOW <= Zone Trigger
+              → Price returned into zone and reached 1/3 level = 0-loss exit for institution
     """
     entries = []
     events  = []
 
     def make(ref_ts, entry, sl):
         return {"ref_ts": ref_ts, "entry": entry, "sl": sl,
-                "status": "ACTIVE", "trapped_on": None, "closed_on": None, "event_idx": None}
+                "status": "ACTIVE", "trapped_on": None,
+                "zone_high": None, "zone_low": None, "zone_trigger": None,
+                "closed_on": None, "event_idx": None}
 
     for i in range(1, len(df75)):
         prev = df75.iloc[i - 1]
@@ -258,19 +268,31 @@ def scan_75min(df75: pd.DataFrame):
         for e in entries:
             if e["status"] == "CLOSED":
                 continue
+
             if e["status"] == "ACTIVE" and curr["high"] > e["sl"]:
-                e["status"]     = "TRAPPED"
-                e["trapped_on"] = ts
-                e["event_idx"]  = len(events)
+                e["status"]      = "TRAPPED"
+                e["trapped_on"]  = ts
+                # ── Zone calculation ──────────────────────────────────────────
+                zone_high    = e["entry"]                           # Ref Bar LOW
+                zone_low     = curr["low"]                          # Trap Bar LOW
+                zone_trigger = zone_low + (zone_high - zone_low) / 3
+                e["zone_high"]    = zone_high
+                e["zone_low"]     = zone_low
+                e["zone_trigger"] = zone_trigger
+                e["event_idx"]    = len(events)
                 events.append({
-                    "Trap Bar"    : ts,
-                    "Ref Bar"     : e["ref_ts"],
-                    "Entry Level" : e["entry"],
-                    "SL Level"    : e["sl"],
-                    "Status"      : "OPEN",
-                    "Close Bar"   : pd.NaT,
+                    "Trap Bar"     : ts,
+                    "Ref Bar"      : e["ref_ts"],
+                    "Entry Level"  : e["entry"],
+                    "SL Level"     : e["sl"],
+                    "Zone High"    : round(zone_high,    2),
+                    "Zone Low"     : round(zone_low,     2),
+                    "Zone Trigger" : round(zone_trigger, 2),
+                    "Status"       : "OPEN",
+                    "Close Bar"    : pd.NaT,
                 })
-            if e["status"] == "TRAPPED" and curr["low"] <= e["entry"]:
+
+            if e["status"] == "TRAPPED" and curr["low"] <= e["zone_trigger"]:
                 e["status"]    = "CLOSED"
                 e["closed_on"] = ts
                 events[e["event_idx"]]["Status"]    = "CLOSED"
@@ -318,17 +340,50 @@ def build_75min_chart(df75: pd.DataFrame, trap_row: dict, context_bars: int = 10
 
     x0, x1 = x_vals.iloc[0], x_vals.iloc[-1]
 
-    # Trap SL level — orange dashed
+    # Zone values from trap_row (if present)
+    zone_high    = trap_row.get("Zone High")
+    zone_low     = trap_row.get("Zone Low")
+    zone_trigger = trap_row.get("Zone Trigger")
+
+    # SL level — orange dashed (where trap fired)
     fig.add_shape(type="line", x0=x0, x1=x1, y0=sl, y1=sl,
                   line=dict(color="#E65100", width=1.5, dash="dash"))
-    fig.add_annotation(x=x1, y=sl, text=f"  Trap/Entry {sl:.2f}",
+    fig.add_annotation(x=x1, y=sl, text=f"  SL Hit {sl:.2f}",
                        showarrow=False, xanchor="left", font=dict(color="#E65100", size=11))
 
-    # Your SL — red dashed
+    # Bear entry (your SL) — red dashed
     fig.add_shape(type="line", x0=x0, x1=x1, y0=your_sl, y1=your_sl,
                   line=dict(color="#B71C1C", width=1.5, dash="dash"))
-    fig.add_annotation(x=x0, y=your_sl, text=f"SL {your_sl:.2f}  ",
+    fig.add_annotation(x=x0, y=your_sl, text=f"Bear Entry {your_sl:.2f}  ",
                        showarrow=False, xanchor="right", font=dict(color="#B71C1C", size=11))
+
+    # Zone — shaded band + boundary lines
+    if zone_high is not None and zone_low is not None:
+        zone_high = float(zone_high)
+        zone_low  = float(zone_low)
+        # shaded zone area
+        fig.add_shape(type="rect", x0=x0, x1=x1,
+                      y0=zone_low, y1=zone_high,
+                      fillcolor="rgba(21,101,192,0.08)",
+                      line=dict(width=0))
+        # zone high line — blue solid
+        fig.add_shape(type="line", x0=x0, x1=x1, y0=zone_high, y1=zone_high,
+                      line=dict(color="#1565C0", width=1.5, dash="solid"))
+        fig.add_annotation(x=x1, y=zone_high, text=f"  Zone High {zone_high:.2f}",
+                           showarrow=False, xanchor="left", font=dict(color="#1565C0", size=11))
+        # zone low line — blue dashed
+        fig.add_shape(type="line", x0=x0, x1=x1, y0=zone_low, y1=zone_low,
+                      line=dict(color="#1565C0", width=1.2, dash="dot"))
+        fig.add_annotation(x=x1, y=zone_low, text=f"  Zone Low {zone_low:.2f}",
+                           showarrow=False, xanchor="left", font=dict(color="#1565C0", size=10))
+
+    if zone_trigger is not None:
+        zone_trigger = float(zone_trigger)
+        # 1/3 trigger — green dashed
+        fig.add_shape(type="line", x0=x0, x1=x1, y0=zone_trigger, y1=zone_trigger,
+                      line=dict(color="#1B5E20", width=1.5, dash="dash"))
+        fig.add_annotation(x=x0, y=zone_trigger, text=f"1/3 Trigger {zone_trigger:.2f}  ",
+                           showarrow=False, xanchor="right", font=dict(color="#1B5E20", size=11))
 
     # Trap vertical line
     trap_x = trap_ts.strftime("%d-%b-%y %H:%M")
@@ -418,16 +473,20 @@ def _scan_one_contract(label, strike, opt_type, cls, expiry, expiry_api,
         for col in ["Trap Bar", "Ref Bar", "Close Bar"]:
             disp[col] = disp[col].apply(
                 lambda x: x.strftime("%d %b %y %H:%M") if pd.notna(x) else "-")
-        disp["Entry Level"] = disp["Entry Level"].map("{:.2f}".format)
-        disp["SL Level"]    = disp["SL Level"].map("{:.2f}".format)
+        for col in ["Entry Level", "SL Level", "Zone High", "Zone Low", "Zone Trigger"]:
+            disp[col] = disp[col].map("{:.2f}".format)
 
         def sc(val):
             if val == "OPEN":   return "color:#E65100;font-weight:bold;"
             if val == "CLOSED": return "color:#6B7280;"
             return ""
 
-        st.dataframe(disp.style.map(sc, subset=["Status"]),
-                     use_container_width=True, height=280, hide_index=True)
+        st.dataframe(
+            disp[["Trap Bar","Ref Bar","Entry Level","SL Level",
+                  "Zone High","Zone Low","Zone Trigger","Status","Close Bar"]]
+            .style.map(sc, subset=["Status"]),
+            use_container_width=True, height=300, hide_index=True,
+        )
 
         # chart drilldown
         df_r = df_events.reset_index(drop=True)
