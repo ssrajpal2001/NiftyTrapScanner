@@ -95,10 +95,15 @@ def expiry_label(d: date) -> str:
     return d.strftime("%d %b %Y")
 
 def option_key_upstox(strike: int, opt_type: str, expiry: date) -> str:
+    """Upstox numeric-style constructed key (fallback only)."""
     yy = expiry.strftime("%y")
     m  = str(expiry.month)
     dd = expiry.strftime("%d")
     return f"NSE_FO|NIFTY{yy}{m}{dd}{strike}{opt_type}"
+
+def trading_symbol(strike: int, opt_type: str, expiry: date) -> str:
+    """Human-readable NSE trading symbol e.g. NIFTY26JUN2522700CE"""
+    return f"NIFTY{expiry.strftime('%d%b%y').upper()}{strike}{opt_type}"
 
 def url_encode(key: str) -> str:
     return key.replace("|", "%7C").replace(" ", "%20")
@@ -303,7 +308,7 @@ def build_75min_chart(df75: pd.DataFrame, trap_row: dict, context_bars: int = 10
             end_i = min(len(df75) - 1, ci[-1] + 5)
 
     w = df75.iloc[start_i : end_i + 1].copy()
-    x_vals = w["datetime"].dt.strftime("%d-%b %H:%M")
+    x_vals = w["datetime"].dt.strftime("%d-%b-%y %H:%M")
 
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
@@ -329,7 +334,7 @@ def build_75min_chart(df75: pd.DataFrame, trap_row: dict, context_bars: int = 10
                        showarrow=False, xanchor="right", font=dict(color="#B71C1C", size=11))
 
     # Trap vertical line
-    trap_x = trap_ts.strftime("%d-%b %H:%M")
+    trap_x = trap_ts.strftime("%d-%b-%y %H:%M")
     if trap_x in x_vals.values:
         fig.add_vline(x=trap_x, line_width=1.5, line_dash="dot", line_color="#E65100",
                       annotation_text="Trap", annotation_position="top",
@@ -337,7 +342,7 @@ def build_75min_chart(df75: pd.DataFrame, trap_row: dict, context_bars: int = 10
 
     # Close vertical line
     if close_ts is not None:
-        close_x = close_ts.strftime("%d-%b %H:%M")
+        close_x = close_ts.strftime("%d-%b-%y %H:%M")
         if close_x in x_vals.values:
             fig.add_vline(x=close_x, line_width=1.5, line_dash="dot", line_color="#6B7280",
                           annotation_text="Closed", annotation_position="top",
@@ -406,16 +411,18 @@ def render_option_scanner(itm_offset: int, weeks_back: int, chart_context: int):
         with st.spinner(f"Looking up instrument key for {strike}{opt_type}..."):
             key, err = get_instrument_key(strike, opt_type, expiry_api)
 
-        if err or not key:
-            # fall back to constructed key
-            key = option_key_upstox(strike, opt_type, expiry)
-            st.warning(f"Option chain lookup failed ({err}). Using constructed key: `{key}`")
-        else:
-            st.success(f"Instrument key: `{key}`")
+        sym = trading_symbol(strike, opt_type, expiry)
 
-        c1, c2 = st.columns(2)
-        card(c1, "Instrument Key", key,      cls)
-        card(c2, "Data Window",    f"{from_date}  →  {to_date}", "")
+        if err or not key:
+            key = option_key_upstox(strike, opt_type, expiry)
+            st.warning("Option chain lookup failed (token may be expired). Using constructed key.")
+        else:
+            st.success("Instrument key resolved from Upstox option chain.")
+
+        c1, c2, c3 = st.columns(3)
+        card(c1, "Trading Symbol",  sym,                           cls)
+        card(c2, "Instrument Key",  key,                           "blue")
+        card(c3, "Data Window",     f"{from_date}  →  {to_date}",  "")
         st.markdown("<br>", unsafe_allow_html=True)
 
         # ── Step 5: fetch 1-min ───────────────────────────────────────────────
@@ -461,7 +468,7 @@ def render_option_scanner(itm_offset: int, weeks_back: int, chart_context: int):
             disp = df_events.copy()
             for col in ["Trap Bar","Ref Bar","Close Bar"]:
                 disp[col] = disp[col].apply(
-                    lambda x: x.strftime("%d %b %H:%M") if pd.notna(x) else "-")
+                    lambda x: x.strftime("%d %b %y %H:%M") if pd.notna(x) else "-")
             disp["Entry Level"] = disp["Entry Level"].map("{:.2f}".format)
             disp["SL Level"]    = disp["SL Level"].map("{:.2f}".format)
 
@@ -486,7 +493,7 @@ def render_option_scanner(itm_offset: int, weeks_back: int, chart_context: int):
 
             df_events_reset = df_events.reset_index(drop=True)
             labels = [
-                f"{row['Trap Bar'].strftime('%d %b %H:%M')}  |  {row['Who Trapped']} TRAPPED  "
+                f"{row['Trap Bar'].strftime('%d %b %y %H:%M')}  |  {row['Who Trapped']} TRAPPED  "
                 f"|  Entry {row['Entry Level']:.2f}  SL {row['SL Level']:.2f}  |  {row['Status']}"
                 for _, row in df_events_reset.iterrows()
             ]
@@ -526,7 +533,7 @@ def render_option_scanner(itm_offset: int, weeks_back: int, chart_context: int):
         if open_traps:
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown(f"**Currently open traps for {label} (market has NOT returned to entry):**")
-            rows = [{"Trapped On"   : e["trapped_on"].strftime("%d %b %H:%M"),
+            rows = [{"Trapped On"   : e["trapped_on"].strftime("%d %b %y %H:%M"),
                      "Kind"         : e["kind"],
                      "Entry Level"  : f"{e['entry']:.2f}",
                      "SL Level"     : f"{e['sl']:.2f}",
@@ -542,7 +549,7 @@ def render_option_scanner(itm_offset: int, weeks_back: int, chart_context: int):
         # ── Raw 75-min bars ───────────────────────────────────────────────────
         with st.expander(f"Raw 75-min bars — {label}"):
             rc = df75.copy()
-            rc["datetime"] = rc["datetime"].dt.strftime("%d %b %H:%M")
+            rc["datetime"] = rc["datetime"].dt.strftime("%d %b %y %H:%M")
             rc["type"] = rc.apply(lambda r: "BULL" if r["close"] > r["open"] else "BEAR", axis=1)
             def ct(v):
                 return "color:#1B5E20;font-weight:bold;" if v=="BULL" else "color:#B71C1C;font-weight:bold;"
