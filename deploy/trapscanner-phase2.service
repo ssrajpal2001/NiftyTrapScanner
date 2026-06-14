@@ -1,0 +1,21 @@
+[Unit]
+Description=NiftyTrapScanner — Phase 2 UI
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/trapscanner
+EnvironmentFile=/opt/trapscanner/.env
+ExecStart=/opt/trapscanner/.venv/bin/streamlit run phase2_ui.py \
+    --server.port=8502 \
+    --server.address=0.0.0.0 \
+    --server.headless=true \
+    --server.enableCORS=false
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

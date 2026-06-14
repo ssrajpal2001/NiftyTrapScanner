@@ -44,6 +44,40 @@ def fetch_spot_prev_day(headers: dict) -> dict:
     }
 
 
+def fetch_spot_for_date(target_date: str, headers: dict) -> dict | None:
+    """
+    Returns the prev trading day's OHLC for Nifty 50 relative to target_date.
+    target_date: 'YYYY-MM-DD'
+    """
+    td   = datetime.strptime(target_date, "%Y-%m-%d")
+    from_str = (td - timedelta(days=14)).strftime("%Y-%m-%d")
+    url  = (f"{UPSTOX_BASE}/historical-candle/"
+            f"NSE_INDEX%7CNifty%2050/day/{target_date}/{from_str}")
+    r    = requests.get(url, headers=headers, timeout=15)
+    body = r.json()
+    if body.get("status") != "success":
+        return None
+    candles = body["data"]["candles"]
+    if not candles:
+        return None
+    candles = list(reversed(candles))
+    target_d = td.date()
+    prev_row = None
+    for c in reversed(candles):
+        if datetime.strptime(c[0][:10], "%Y-%m-%d").date() < target_d:
+            prev_row = c
+            break
+    if prev_row is None:
+        return None
+    return {
+        "date" : prev_row[0][:10],
+        "open" : round(prev_row[1], 2),
+        "high" : round(prev_row[2], 2),
+        "low"  : round(prev_row[3], 2),
+        "close": round(prev_row[4], 2),
+    }
+
+
 def get_instrument_key(strike: int, opt_type: str, expiry_str: str,
                        headers: dict) -> tuple:
     """Returns (instrument_key, error_or_None)."""

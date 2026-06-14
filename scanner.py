@@ -75,8 +75,8 @@ def scan_htf(df: pd.DataFrame) -> tuple:
                     "Close Bar"  : pd.NaT,
                 })
 
-            # ── CLOSE fires (your entry hit) ──────────────────────────────────
-            if e["status"] == "TRAPPED" and curr["low"] <= e["zone_trigger"]:
+            # ── CLOSE fires when price returns to LTF Ref Bar LOW (bear entry) ──
+            if e["status"] == "TRAPPED" and curr["low"] <= e["entry"]:
                 e["status"]    = "CLOSED"
                 e["closed_on"] = ts
                 events[e["event_idx"]]["Status"]    = "CLOSED"
@@ -156,14 +156,15 @@ def backtest(df: pd.DataFrame,
     trades = []
 
     for e in all_entries:
-        if e["status"] != "CLOSED" or e.get("closed_on") is None:
+        # Entry fires when the LTF bears get TRAPPED (high > their SL = Ref Bar HIGH)
+        if e["status"] not in ("TRAPPED", "CLOSED") or e.get("trapped_on") is None:
             continue
 
-        entry_price = round(e["zone_trigger"], 2)
-        # Use htf_target tagged by scan_ltf; fall back to own SL for single-TF backtest
+        # Enter at LTF Ref Bar LOW — where 5-min bears entered short, price returns here
+        entry_price = round(e["entry"], 2)
         target      = round(e.get("htf_target") or e["sl"], 2)
         sl_price    = round(e["zone_low"] - buffer, 2)
-        entry_ts    = pd.Timestamp(e["closed_on"])
+        entry_ts    = pd.Timestamp(e["closed_on"])   # bar where price hit Ref Bar LOW
         entry_date  = entry_ts.date()
 
         # Bars strictly after entry on same calendar day
@@ -220,16 +221,17 @@ def backtest(df: pd.DataFrame,
             "LTF Entry Time" : entry_ts.strftime("%H:%M"),
             "LTF Exit Time"  : exit_ts.strftime("%H:%M") if hasattr(exit_ts, "strftime") else str(exit_ts),
             "LTF Entry"      : entry_price,
+            "LTF Zone Low"   : round(e["zone_low"], 2),
             "LTF Target"     : target,
             "LTF SL"         : sl_price,
             "LTF Exit Price" : exit_price,
             "Exit"           : exit_reason,
-            "P&L (₹)"       : pnl,
+            "P&L (Rs)"      : pnl,
         })
 
     df_trades = pd.DataFrame(trades)
     if not df_trades.empty:
-        df_trades["Cumulative P&L"] = df_trades["P&L (₹)"].cumsum().round(2)
+        df_trades["Cumulative P&L"] = df_trades["P&L (Rs)"].cumsum().round(2)
     return df_trades
 
 
@@ -238,14 +240,14 @@ def trade_summary(df_trades: pd.DataFrame) -> dict:
     if df_trades.empty:
         return {}
     total    = len(df_trades)
-    wins     = int((df_trades["P&L (₹)"] > 0).sum())
-    losses   = int((df_trades["P&L (₹)"] <= 0).sum())
-    net_pnl  = round(df_trades["P&L (₹)"].sum(), 2)
+    wins     = int((df_trades["P&L (Rs)"] > 0).sum())
+    losses   = int((df_trades["P&L (Rs)"] <= 0).sum())
+    net_pnl  = round(df_trades["P&L (Rs)"].sum(), 2)
     win_rate = round(wins / total * 100, 1) if total else 0
-    best     = round(df_trades["P&L (₹)"].max(), 2)
-    worst    = round(df_trades["P&L (₹)"].min(), 2)
-    avg_win  = round(df_trades[df_trades["P&L (₹)"] > 0]["P&L (₹)"].mean(), 2) if wins else 0
-    avg_loss = round(df_trades[df_trades["P&L (₹)"] <= 0]["P&L (₹)"].mean(), 2) if losses else 0
+    best     = round(df_trades["P&L (Rs)"].max(), 2)
+    worst    = round(df_trades["P&L (Rs)"].min(), 2)
+    avg_win  = round(df_trades[df_trades["P&L (Rs)"] > 0]["P&L (Rs)"].mean(), 2) if wins else 0
+    avg_loss = round(df_trades[df_trades["P&L (Rs)"] <= 0]["P&L (Rs)"].mean(), 2) if losses else 0
     return {
         "total": total, "wins": wins, "losses": losses,
         "net_pnl": net_pnl, "win_rate": win_rate,
