@@ -54,45 +54,46 @@ st.set_page_config(
 st.markdown("""
 <style>
 html, body, [data-testid="stAppViewContainer"] {
-    background-color: #0D1117; color: #E6EDF3;
+    background-color: #FFFFFF; color: #1A1A1A;
     font-family: 'Segoe UI', sans-serif;
 }
-[data-testid="stSidebar"] { background-color: #161B22; border-right: 1px solid #30363D; }
-h1, h2, h3 { color: #58A6FF; }
+[data-testid="stSidebar"] { background-color: #F5F7FA; border-right: 1px solid #D0D7DE; }
+[data-testid="stSidebar"] * { color: #1A1A1A !important; }
+h1, h2, h3 { color: #0969DA; }
 .metric-card {
-    background: #161B22; border: 1px solid #30363D;
+    background: #F5F7FA; border: 1px solid #D0D7DE;
     border-radius: 8px; padding: 12px 16px; text-align: center;
 }
-.metric-label { color: #8B949E; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
-.metric-value { color: #E6EDF3; font-size: 20px; font-weight: bold; margin-top: 4px; }
-.metric-value.green  { color: #3FB950; }
-.metric-value.red    { color: #F85149; }
-.metric-value.blue   { color: #58A6FF; }
-.metric-value.orange { color: #f0a500; }
+.metric-label { color: #57606A; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+.metric-value { color: #1A1A1A; font-size: 20px; font-weight: bold; margin-top: 4px; }
+.metric-value.green  { color: #1A7F37; }
+.metric-value.red    { color: #CF222E; }
+.metric-value.blue   { color: #0969DA; }
+.metric-value.orange { color: #BF5B00; }
 .sec-header {
-    background: #1C2128; border-left: 4px solid #58A6FF;
+    background: #EAF0F6; border-left: 4px solid #0969DA;
     padding: 8px 14px; margin: 16px 0 8px 0;
-    font-size: 14px; font-weight: 600; color: #58A6FF;
+    font-size: 14px; font-weight: 600; color: #0969DA;
     border-radius: 0 4px 4px 0;
 }
 .alert-orange {
-    background: #2D1F00; border: 1px solid #f0a500; border-left: 5px solid #f0a500;
+    background: #FFF8E6; border: 1px solid #BF5B00; border-left: 5px solid #BF5B00;
     padding: 12px 16px; margin: 6px 0; border-radius: 4px;
-    font-size: 14px; font-weight: 600; color: #f0a500;
+    font-size: 14px; font-weight: 600; color: #BF5B00;
 }
 .alert-green {
-    background: #0D2818; border: 1px solid #3FB950; border-left: 5px solid #3FB950;
+    background: #EAFBEE; border: 1px solid #1A7F37; border-left: 5px solid #1A7F37;
     padding: 12px 16px; margin: 6px 0; border-radius: 4px;
-    font-size: 14px; font-weight: 600; color: #3FB950;
+    font-size: 14px; font-weight: 600; color: #1A7F37;
 }
 .pnl-card {
-    background: #161B22; border: 1px solid #30363D;
+    background: #F5F7FA; border: 1px solid #D0D7DE;
     border-radius: 8px; padding: 16px; margin: 6px 0;
 }
 .zone-box {
-    background: #1C2128; border: 1px solid #30363D;
+    background: #F0F4F8; border: 1px solid #D0D7DE;
     border-radius: 6px; padding: 10px 14px; margin: 4px 0;
-    font-size: 13px;
+    font-size: 13px; color: #1A1A1A;
 }
 </style>
 """, unsafe_allow_html=True)
