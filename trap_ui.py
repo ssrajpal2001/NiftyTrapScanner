@@ -483,7 +483,7 @@ def _scan_one_contract(label, strike, opt_type, cls, expiry, expiry_api,
                      use_container_width=True, height=350, hide_index=True)
 
 
-def render_option_scanner(round_step: int, tf_minutes: int, weeks_back: int, chart_context: int):
+def render_option_scanner(round_step: int, itm_offset: int, tf_minutes: int, weeks_back: int, chart_context: int):
     sec("STEP 1 : Prev-Day Nifty Spot")
 
     with st.spinner("Fetching prev-day Nifty spot..."):
@@ -532,17 +532,27 @@ def render_option_scanner(round_step: int, tf_minutes: int, weeks_back: int, cha
         card(cols[i*2],     f"{name} (raw)", f"{raw:,.2f}",   "")
         card(cols[i*2+1],   f"{name} ×{round_step}", f"{rounded:,}", cls)
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    sec(f"STEP 3 : ATM CE + ATM PE Trap Scan  |  {tf_minutes}-min  |  BEARISH TRAPS only")
-    st.caption(f"ATM Strike = Pivot ×{round_step} = **{pivot:,}**  |  R1/R2/S1/S2 shown above for reference only")
+    itm_ce = round_n(pivot - itm_offset, round_step)
+    itm_pe = round_n(pivot + itm_offset, round_step)
 
-    t1, t2 = st.tabs([f"ATM CE  —  {pivot:,}CE", f"ATM PE  —  {pivot:,}PE"])
+    st.markdown("<br>", unsafe_allow_html=True)
+    sec(f"STEP 3 : ITM Strikes")
+
+    c1, c2 = st.columns(2)
+    card(c1, f"ITM CE  (Pivot − {itm_offset})", f"{itm_ce:,}", "green")
+    card(c2, f"ITM PE  (Pivot + {itm_offset})", f"{itm_pe:,}", "red")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    sec(f"STEP 4 : ITM CE + ITM PE Trap Scan  |  {tf_minutes}-min  |  BEARISH TRAPS only")
+    st.caption(f"R1/R2/S1/S2 shown above for reference only — scanning is ITM only")
+
+    t1, t2 = st.tabs([f"ITM CE  —  {itm_ce:,}CE", f"ITM PE  —  {itm_pe:,}PE"])
     with t1:
-        _scan_one_contract("ATM CE", pivot, "CE", "green",
+        _scan_one_contract("ITM CE", itm_ce, "CE", "green",
                            expiry, expiry_api, from_date, to_date,
                            tf_minutes, chart_context)
     with t2:
-        _scan_one_contract("ATM PE", pivot, "PE", "red",
+        _scan_one_contract("ITM PE", itm_pe, "PE", "red",
                            expiry, expiry_api, from_date, to_date,
                            tf_minutes, chart_context)
 
@@ -825,6 +835,8 @@ with st.sidebar:
         st.markdown("**Settings**")
         round_step   = st.number_input("Round-off step (pts)", value=50, step=10, min_value=10,
                                         help="All pivot levels rounded to nearest this value")
+        itm_offset   = st.number_input("ITM Offset (pts)", value=500, step=50, min_value=50,
+                                        help="CE Strike = Pivot − offset  |  PE Strike = Pivot + offset")
         tf_minutes   = st.number_input("Timeframe (minutes)", value=75, step=5, min_value=5,
                                         help="Bar size for trap detection")
         weeks_back   = st.selectbox("Data window",
@@ -865,8 +877,8 @@ HEADERS["Accept"] = "application/json"
 # ══════════════════════════════════════════════════════════════════════════════
 if active_tab == "Option 75-min Traps":
     st.markdown(f"# Option {tf_minutes}-min Trap Scanner")
-    st.markdown(f"*Prev-day Nifty → Pivot/R1/S1/R2/S2 (×{round_step}) → CE+PE for each level → {tf_minutes}-min bars → Bearish trap detection*")
-    render_option_scanner(round_step, tf_minutes, weeks_back, chart_ctx)
+    st.markdown(f"*Prev-day Nifty → Pivot (×{round_step}) → ITM CE (Pivot−{itm_offset}) + ITM PE (Pivot+{itm_offset}) → {tf_minutes}-min bars → Bearish trap detection*")
+    render_option_scanner(round_step, itm_offset, tf_minutes, weeks_back, chart_ctx)
 else:
     st.markdown("# Daily Nifty Trap Scanner  *(52-week validation)*")
     st.markdown("*Validates trap logic on Nifty 50 daily candles*")
