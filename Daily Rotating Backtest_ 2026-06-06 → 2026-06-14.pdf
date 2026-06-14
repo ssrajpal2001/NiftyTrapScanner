@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<!-- saved from url=(0073)file:///C:/Users/Sarabjeet/Downloads/trap_report_20260614_2354%20(1).html -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<title>Daily Rotating Backtest: 2026-06-06 → 2026-06-14</title>
+<style>
+  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; color: #1A1A2E; margin: 20px; }
+  h1   { color: #1565C0; font-size: 18px; margin-bottom: 4px; }
+  h2   { color: #1565C0; font-size: 13px; margin: 16px 0 6px 0; border-bottom: 2px solid #1565C0; padding-bottom: 4px; }
+  .sub { color: #6B7280; font-size: 10px; margin-bottom: 16px; }
+  .cards { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+  .card  { border: 1px solid #DDE1E7; border-radius: 6px; padding: 10px 14px; min-width: 130px; background: #F5F7FA; }
+  .label { color: #6B7280; font-size: 9px; text-transform: uppercase; letter-spacing: 1px; }
+  .value { font-size: 16px; font-weight: bold; margin-top: 2px; }
+  table  { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+  th     { background: #1565C0; color: #fff; padding: 5px 7px; text-align: left; font-size: 10px; }
+  td     { padding: 4px 7px; border-bottom: 1px solid #EEE; font-size: 10px; }
+  tr:hover { background: #F0F4FF !important; }
+  @media print { body { margin: 10px; } .no-print { display: none; } }
+</style>
+</head><body>
+<h1>Daily Rotating Backtest: 2026-06-06 → 2026-06-14</h1>
+<div class="sub">Generated: 14 Jun 2026 23:54 &nbsp;|&nbsp; Trap Scanner Phase 2</div>
+
+<h2>Performance Summary</h2>
+<div class="cards"><div class="card"><div class="label">Net P&amp;L</div><div class="value" style="color:#1B5E20">₹6,737</div></div><div class="card"><div class="label">Total Trades</div><div class="value" style="color:#1565C0">15</div></div><div class="card"><div class="label">Win Rate</div><div class="value" style="color:#B71C1C">26.7%</div></div><div class="card"><div class="label">Max Drawdown</div><div class="value" style="color:#B71C1C">₹-6,598</div></div><div class="card"><div class="label">Avg Win</div><div class="value" style="color:#1B5E20">₹3,582</div></div><div class="card"><div class="label">Avg Loss</div><div class="value" style="color:#B71C1C">₹-690</div></div><div class="card"><div class="label">Best Trade</div><div class="value" style="color:#1B5E20">₹5,561</div></div><div class="card"><div class="label">Worst Trade</div><div class="value" style="color:#B71C1C">₹-1,596</div></div></div>
+
+<h2>Date-wise P&amp;L</h2>
+<table>
+  <thead><tr><th>Date</th><th>Trades</th><th>P&amp;L (₹)</th><th>Cumulative (₹)</th></tr></thead>
+  <tbody><tr><td>08 Jun 2026</td><td>1</td><td style="color:#1B5E20;font-weight:bold">₹5,561</td><td style="color:#1B5E20">₹5,561</td></tr><tr><td>09 Jun 2026</td><td>3</td><td style="color:#1B5E20;font-weight:bold">₹7,553</td><td style="color:#1B5E20">₹13,114</td></tr><tr><td>10 Jun 2026</td><td>5</td><td style="color:#B71C1C;font-weight:bold">₹-3,429</td><td style="color:#B71C1C">₹9,685</td></tr><tr><td>11 Jun 2026</td><td>3</td><td style="color:#B71C1C;font-weight:bold">₹-1,573</td><td style="color:#B71C1C">₹8,112</td></tr><tr><td>12 Jun 2026</td><td>3</td><td style="color:#B71C1C;font-weight:bold">₹-1,375</td><td style="color:#B71C1C">₹6,737</td></tr></tbody>
+</table>
+
+<h2>Full Trade Log</h2>
+<table>
+  <thead><tr><th>Contract</th><th>LTF Date</th><th>LTF Entry Time</th><th>LTF Exit Time</th><th>LTF Entry</th><th>LTF Zone Low</th><th>LTF Target</th><th>LTF SL</th><th>LTF Exit Price</th><th>Exit</th><th>P&amp;L (Rs)</th><th>Cumulative P&amp;L</th><th>HTF Ref Bar</th><th>HTF Trap Bar</th><th>HTF Zone High</th><th>HTF Zone Low</th><th>HTF Target</th></tr></thead>
+  <tbody><tr style="background:#E8F5E9"><td>23600PE</td><td>08 Jun 26</td><td>13:20</td><td>15:00</td><td>424.45</td><td>421.0</td><td>510.0</td><td>419.0</td><td>510.0</td><td>TARGET</td><td>5560.75</td><td>5560.75</td><td>2026-05-18 11:45</td><td>2026-05-20 09:15</td><td>445.1</td><td>440.0</td><td>510.0</td></tr><tr style="background:#E8F5E9"><td>23200PE</td><td>09 Jun 26</td><td>09:35</td><td>11:20</td><td>175.15</td><td>162.7</td><td>233.6</td><td>160.7</td><td>233.6</td><td>TARGET</td><td>3799.25</td><td>9360.0</td><td>2026-05-22 09:15</td><td>2026-06-02 09:15</td><td>183.0</td><td>177.0</td><td>233.6</td></tr><tr style="background:#FFEBEE"><td>23200PE</td><td>09 Jun 26</td><td>11:35</td><td>11:40</td><td>210.0</td><td>208.55</td><td>250.0</td><td>206.55</td><td>206.55</td><td>SL</td><td>-224.25</td><td>9135.75</td><td>2026-05-21 13:00</td><td>2026-06-03 10:30</td><td>228.2</td><td>221.0</td><td>250.0</td></tr><tr style="background:#E8F5E9"><td>23000CE</td><td>09 Jun 26</td><td>11:45</td><td>14:40</td><td>312.9</td><td>298.5</td><td>374.1</td><td>296.5</td><td>374.1</td><td>TARGET</td><td>3978.0</td><td>13113.75</td><td>2026-06-09 09:15</td><td>2026-06-09 14:15</td><td>318.75</td><td>287.2</td><td>374.1</td></tr><tr style="background:#FFEBEE"><td>23300PE</td><td>10 Jun 26</td><td>10:35</td><td>10:55</td><td>154.05</td><td>148.05</td><td>242.5</td><td>146.05</td><td>146.05</td><td>SL</td><td>-520.0</td><td>12593.75</td><td>2026-06-02 10:30</td><td>2026-06-03 09:15</td><td>204.85</td><td>160.8</td><td>242.5</td></tr><tr style="background:#FFEBEE"><td>23100CE</td><td>10 Jun 26</td><td>11:00</td><td>12:40</td><td>360.55</td><td>343.1</td><td>448.7</td><td>341.1</td><td>341.1</td><td>SL</td><td>-1264.25</td><td>11329.5</td><td>2026-06-03 09:15</td><td>2026-06-03 11:45</td><td>394.0</td><td>371.75</td><td>448.7</td></tr><tr style="background:#FFEBEE"><td>23300PE</td><td>10 Jun 26</td><td>12:45</td><td>12:50</td><td>147.4</td><td>136.3</td><td>235.65</td><td>134.3</td><td>134.3</td><td>SL</td><td>-851.5</td><td>10478.0</td><td>2026-06-05 13:00</td><td>2026-06-08 09:15</td><td>182.0</td><td>148.2</td><td>235.65</td></tr><tr style="background:#FFEBEE"><td>23100CE</td><td>10 Jun 26</td><td>13:00</td><td>13:20</td><td>388.15</td><td>380.0</td><td>572.1</td><td>378.0</td><td>378.0</td><td>SL</td><td>-659.75</td><td>9818.25</td><td>2026-06-01 14:15</td><td>2026-06-02 13:00</td><td>532.0</td><td>410.0</td><td>572.1</td></tr><tr style="background:#FFEBEE"><td>23000CE</td><td>10 Jun 26</td><td>13:25</td><td>13:30</td><td>448.05</td><td>448.0</td><td>637.5</td><td>446.0</td><td>446.0</td><td>SL</td><td>-133.25</td><td>9685.0</td><td>2026-06-01 14:15</td><td>2026-06-02 11:45</td><td>592.0</td><td>471.85</td><td>637.5</td></tr><tr style="background:#FFEBEE"><td>23100CE</td><td>11 Jun 26</td><td>10:00</td><td>10:05</td><td>164.4</td><td>162.15</td><td>316.65</td><td>160.15</td><td>160.15</td><td>SL</td><td>-276.25</td><td>9408.75</td><td>2026-06-10 14:15</td><td>2026-06-11 13:00</td><td>234.3</td><td>159.65</td><td>316.65</td></tr><tr style="background:#FFEBEE"><td>23400PE</td><td>11 Jun 26</td><td>12:45</td><td>13:00</td><td>211.0</td><td>195.85</td><td>242.0</td><td>193.85</td><td>193.85</td><td>SL</td><td>-1114.75</td><td>8294.0</td><td>2026-05-22 10:30</td><td>2026-05-22 14:15</td><td>231.5</td><td>218.0</td><td>242.0</td></tr><tr style="background:#FFEBEE"><td>23000CE</td><td>11 Jun 26</td><td>13:10</td><td>13:15</td><td>338.8</td><td>338.0</td><td>447.25</td><td>336.0</td><td>336.0</td><td>SL</td><td>-182.0</td><td>8112.0</td><td>2026-06-08 11:45</td><td>2026-06-10 09:15</td><td>381.05</td><td>351.55</td><td>447.25</td></tr><tr style="background:#FFEBEE"><td>23000CE</td><td>12 Jun 26</td><td>11:00</td><td>12:15</td><td>395.3</td><td>372.75</td><td>469.6</td><td>370.75</td><td>370.75</td><td>SL</td><td>-1595.75</td><td>6516.25</td><td>2026-06-03 10:30</td><td>2026-06-03 13:00</td><td>432.55</td><td>410.0</td><td>469.6</td></tr><tr style="background:#E8F5E9"><td>23300PE</td><td>12 Jun 26</td><td>12:40</td><td>12:45</td><td>111.1</td><td>103.2</td><td>126.35</td><td>101.2</td><td>126.35</td><td>TARGET</td><td>991.25</td><td>7507.5</td><td>2026-05-25 11:45</td><td>2026-05-29 14:15</td><td>119.5</td><td>116.0</td><td>126.35</td></tr><tr style="background:#FFEBEE"><td>23400PE</td><td>12 Jun 26</td><td>13:05</td><td>13:25</td><td>156.6</td><td>146.75</td><td>290.1</td><td>144.75</td><td>144.75</td><td>SL</td><td>-770.25</td><td>6737.25</td><td>2026-06-02 11:45</td><td>2026-06-03 09:15</td><td>194.75</td><td>163.5</td><td>290.1</td></tr></tbody>
+</table>
+
+<div class="sub" style="margin-top:20px">
+  🟢 Green = TARGET hit &nbsp;|&nbsp; 🔴 Red = SL hit &nbsp;|&nbsp; 🟡 Yellow = Square-off
+</div>
+</body></html>

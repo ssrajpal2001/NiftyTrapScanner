@@ -1,0 +1,29 @@
+I am continuing work on TrapScanner — a Nifty + Sensex bearish trap scanner.
+
+Repo: https://github.com/ssrajpal2001/NiftyTrapScanner
+Branch: phase2/ltf-entry-engine
+Local: D:\AlgoSoft\TrapScanner
+Run: streamlit run live_tracker.py (port 8501) | streamlit run phase2_ui.py (port 8502)
+
+Please read memory files:
+- trapscanner_project.md
+- trapscanner_phase3_strategy.md  
+- trapscanner_pending.md
+
+Today I want to:
+[TELL CLAUDE WHAT YOU WANT — examples below]
+
+Option A — After market session:
+"I ran live_tracker.py during today's session. Here is the log file contents: [PASTE LOG]. 
+Help me analyse what happened and fix any issues."
+
+Option B — Test phase2_ui Phase 3 section:
+"Test and fix the Phase 3 paired analysis section in phase2_ui.py — 
+it was just built, not tested in browser yet."
+
+Option C — Date-range backtest Phase 3:
+"Update run_daterange_backtest in phase2_ui.py to use backtest_phase3 
+with paired contracts (S1 CE ↔ R1 PE, S2 CE ↔ R2 PE)."
+
+Option D — EC2 deployment:
+"My EC2 has ports [X] and [Y] open. Set up and deploy TrapScanner."

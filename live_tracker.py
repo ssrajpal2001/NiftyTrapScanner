@@ -491,12 +491,14 @@ def render_live_pnl(entry_hits: list, df1_map: dict, log_path: Path):
 #  MAIN
 # ==============================================================================
 def _render_pair_phase3(pair_label, ce_sym, pe_sym,
-                        ltf_results: dict, df1_map: dict, log_path: Path):
+                        ltf_results: dict, df1_map: dict, log_path: Path,
+                        sl_direction_filter: bool = False):
     """
     Phase 3 paired display.
     SL   = counterpart entry fires (other side's LTF ref bar LOW hit)
     Target = same side HTF ref bar HIGH (already in setup["target"])
     Only one side trade is active at a time.
+    sl_direction_filter: only SL if counterpart entry price is rising.
     """
     ce_entries, ce_alerts = ltf_results.get(ce_sym, ([], []))
     pe_entries, pe_alerts = ltf_results.get(pe_sym, ([], []))
@@ -565,10 +567,21 @@ def _render_pair_phase3(pair_label, ce_sym, pe_sym,
         active      = pe_entries[0]
         sl_was_hit  = False
 
-    # SL watch level = counterpart's pending entry price (if bears trapped on that side)
-    counterpart_alerts = pe_alerts if active_side == "CE" else ce_alerts
-    sl_watch_price = counterpart_alerts[0]["entry_price"] if counterpart_alerts else None
-    sl_watch_sym   = pe_sym if active_side == "CE" else ce_sym
+    # SL watch: counterpart pending entry (with optional direction filter)
+    counterpart_alerts  = pe_alerts if active_side == "CE" else ce_alerts
+    counterpart_entries_fired = pe_entries if active_side == "CE" else ce_entries
+    sl_watch_sym = pe_sym if active_side == "CE" else ce_sym
+
+    sl_watch_price = None
+    if counterpart_alerts:
+        cp_candidate_price = counterpart_alerts[0]["entry_price"]
+        if sl_direction_filter and counterpart_entries_fired:
+            # Only valid SL if candidate price > last fired counterpart entry price
+            last_cp_price = counterpart_entries_fired[-1]["entry_price"]
+            if cp_candidate_price > last_cp_price:
+                sl_watch_price = cp_candidate_price
+        else:
+            sl_watch_price = cp_candidate_price
 
     # LTP + P&L
     sym    = active["sym"]
@@ -600,7 +613,7 @@ def _render_pair_phase3(pair_label, ce_sym, pe_sym,
     card(cols[4], "P&L",         pnl_str,                              pnl_cls)
     card(cols[5], "Target",      f"{target:.2f}",                      "green")
     card(cols[6], "SL Trigger",
-         f"{sl_watch_sym} @ {sl_watch_price:.2f}" if sl_watch_price else f"{sl_watch_sym} entry",
+         f"If {sl_watch_sym} fires → exit at mkt" if sl_watch_price else f"Watch {sl_watch_sym}",
          "orange")
 
     # Status banner
@@ -611,8 +624,7 @@ def _render_pair_phase3(pair_label, ce_sym, pe_sym,
         log_event(log_path, "TARGET_HIT", msg)
         browser_notify(f"TARGET: {sym}", msg)
     else:
-        sl_label = (f"SL fires if {sl_watch_sym} entry triggers"
-                    + (f" @ {sl_watch_price:.2f}" if sl_watch_price else ""))
+        sl_label = f"SL fires if {sl_watch_sym} entry triggers → exit {sym} at market price"
         st.markdown(
             f'<div class="alert-green">ACTIVE {active_side}: {sym} | '
             f'Entry {entry:.2f} | LTP {ltp:.2f if ltp else "--"} | P&L {pnl_str} | '
@@ -668,11 +680,17 @@ def main():
 
         st.markdown("---")
         st.markdown("**Settings**")
-        htf_minutes  = st.number_input("HTF (min)",        value=HTF_MINUTES, step=5, min_value=5)
-        ltf_minutes  = st.number_input("LTF (min)",        value=LTF_MINUTES, step=1, min_value=1)
-        sl_buffer    = st.number_input("SL Buffer (pts)",  value=DEFAULT_SL_BUFFER, step=0.5)
-        refresh_secs = st.number_input("Refresh (secs)",   value=30, step=10, min_value=10)
-        auto_refresh = st.toggle("Auto-refresh", value=True)
+        htf_minutes    = st.number_input("HTF (min)",        value=HTF_MINUTES, step=5, min_value=5)
+        ltf_minutes    = st.number_input("LTF (min)",        value=LTF_MINUTES, step=1, min_value=1)
+        sl_buffer      = st.number_input("SL Buffer (pts)",  value=DEFAULT_SL_BUFFER, step=0.5)
+        refresh_secs   = st.number_input("Refresh (secs)",   value=30, step=10, min_value=10)
+        auto_refresh   = st.toggle("Auto-refresh", value=True)
+        sl_dir_filter  = st.toggle(
+            "Phase 3 SL Direction Filter",
+            value=False,
+            help="ON = only SL if counterpart entry price is RISING. "
+                 "Filters false SL signals when counterpart is in a downtrend (e.g. PE falling on bullish day)."
+        )
 
         st.markdown("---")
         if st.button("Force Refresh", use_container_width=True, type="primary"):
@@ -893,6 +911,7 @@ def main():
         _render_pair_phase3(
             pair["label"], pair["ce_sym"], pair["pe_sym"],
             ltf_results, df1_map, log_path,
+            sl_direction_filter=sl_dir_filter,
         )
 
     # -- Live log tail ---------------------------------------------------------
