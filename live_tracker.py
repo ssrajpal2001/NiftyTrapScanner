@@ -38,8 +38,8 @@ from config import (
     CLR_GREEN, CLR_RED, CLR_BLUE, CLR_ORANGE, CLR_MUTED,
 )
 from data import (
-    fetch_spot_prev_day, get_instrument_key, fetch_1min,
-    resample_tf, pivot_levels,
+    fetch_spot_prev_day, get_instrument_key, get_option_expiries,
+    fetch_1min, resample_tf, pivot_levels, OPTION_CHAIN_KEYS,
 )
 from scanner import scan_htf, scan_ltf
 
@@ -214,6 +214,12 @@ def _get_token() -> str:
 
 
 # -- cached data fetchers ------------------------------------------------------
+@st.cache_data(ttl=3600)
+def _fetch_expiries(index: str, token: str) -> list:
+    h = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    chain_key = OPTION_CHAIN_KEYS.get(index, OPTION_CHAIN_KEYS["Nifty"])
+    return get_option_expiries(chain_key, h)
+
 @st.cache_data(ttl=300)
 def _fetch_spot(token, index: str = "Nifty"):
     h = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -559,10 +565,21 @@ def main():
     for idx_name in selected_indices:
         cfg        = INDEX_CONFIG[idx_name]
         step       = cfg["strike_step"]
-        expiry     = cfg["expiry_fn"](date.today())
-        expiry_api = expiry.strftime("%Y-%m-%d")
         prefix     = cfg["symbol_prefix"]
         lbl_idx    = cfg["label"]
+
+        # Fetch available expiries from Upstox; fall back to computed day if empty
+        available_expiries = _fetch_expiries(idx_name, token)
+        today_str_iso = date.today().strftime("%Y-%m-%d")
+        computed_expiry = cfg["expiry_fn"](date.today())
+        if available_expiries:
+            # Pick nearest expiry on or after today
+            future = [e for e in available_expiries if e >= today_str_iso]
+            expiry_api = future[0] if future else available_expiries[-1]
+            expiry = datetime.strptime(expiry_api, "%Y-%m-%d").date()
+        else:
+            expiry     = computed_expiry
+            expiry_api = expiry.strftime("%Y-%m-%d")
 
         try:
             spot = _fetch_spot(token, idx_name)
@@ -584,6 +601,12 @@ def main():
         card(sc[3], f"R1 PE x{step}",           f"{r1:,}",             "red")
         card(sc[4], f"R2 PE x{step}",           f"{r2:,}",             "red")
         card(sc[5], f"{lbl_idx} Expiry",        expiry.strftime("%d %b %y"), "")
+        if available_expiries:
+            st.caption(f"{lbl_idx} available expiries from Upstox: {available_expiries[:6]}")
+        else:
+            st.warning(f"{lbl_idx}: No expiry list returned from Upstox — "
+                       f"using computed {expiry_api}. "
+                       f"Check that `{OPTION_CHAIN_KEYS.get(idx_name)}` is the correct index key.")
 
         if not st.session_state.get(log_header_key):
             with open(log_path, "a", encoding="utf-8") as f:

@@ -91,6 +91,18 @@ def fetch_spot_for_date(target_date: str, headers: dict, index: str = "Nifty") -
     }
 
 
+def get_option_expiries(index_key: str, headers: dict) -> list:
+    """Return available option expiry dates for an index key (sorted asc)."""
+    encoded = url_encode(index_key)
+    url  = f"{UPSTOX_BASE}/option/contract?instrument_key={encoded}"
+    r    = requests.get(url, headers=headers, timeout=15)
+    body = r.json()
+    if body.get("status") != "success":
+        return []
+    return sorted({item.get("expiry") for item in body.get("data", [])
+                   if item.get("expiry")})
+
+
 def get_instrument_key(strike: int, opt_type: str, expiry_str: str,
                        headers: dict, index: str = "Nifty") -> tuple:
     """Returns (instrument_key, error_or_None)."""
