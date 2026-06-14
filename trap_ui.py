@@ -254,10 +254,16 @@ def scan_75min(df75: pd.DataFrame):
     entries = []
     events  = []
 
-    def make(ref_ts, entry, sl):
+    def make(ref_ts, entry, sl, next_low):
+        # Zone defined immediately at entry detection:
+        # Zone HIGH = Ref Bar LOW (where bears shorted)
+        # Zone LOW  = NEXT bar's LOW (bar right after Ref Bar, not the trap bar)
+        zone_high    = entry
+        zone_low     = next_low
+        zone_trigger = zone_low + (zone_high - zone_low) / 3
         return {"ref_ts": ref_ts, "entry": entry, "sl": sl,
                 "status": "ACTIVE", "trapped_on": None,
-                "zone_high": None, "zone_low": None, "zone_trigger": None,
+                "zone_high": zone_high, "zone_low": zone_low, "zone_trigger": zone_trigger,
                 "closed_on": None, "event_idx": None}
 
     for i in range(1, len(df75)):
@@ -270,26 +276,19 @@ def scan_75min(df75: pd.DataFrame):
                 continue
 
             if e["status"] == "ACTIVE" and curr["high"] > e["sl"]:
-                e["status"]      = "TRAPPED"
-                e["trapped_on"]  = ts
-                # ── Zone calculation ──────────────────────────────────────────
-                zone_high    = e["entry"]                           # Ref Bar LOW
-                zone_low     = curr["low"]                          # Trap Bar LOW
-                zone_trigger = zone_low + (zone_high - zone_low) / 3
-                e["zone_high"]    = zone_high
-                e["zone_low"]     = zone_low
-                e["zone_trigger"] = zone_trigger
-                e["event_idx"]    = len(events)
+                e["status"]     = "TRAPPED"
+                e["trapped_on"] = ts
+                e["event_idx"]  = len(events)
                 events.append({
-                    "Trap Bar"     : ts,
-                    "Ref Bar"      : e["ref_ts"],
-                    "Entry Level"  : e["entry"],
-                    "SL Level"     : e["sl"],
-                    "Zone High"    : round(zone_high,    2),
-                    "Zone Low"     : round(zone_low,     2),
-                    "Zone Trigger" : round(zone_trigger, 2),
-                    "Status"       : "OPEN",
-                    "Close Bar"    : pd.NaT,
+                    "Trap Bar"   : ts,
+                    "Ref Bar"    : e["ref_ts"],
+                    "Bear Entry" : round(e["entry"],        2),
+                    "SL Level"   : round(e["sl"],           2),
+                    "Zone High"  : round(e["zone_high"],    2),
+                    "Zone Low"   : round(e["zone_low"],     2),
+                    "Your Entry" : round(e["zone_trigger"], 2),
+                    "Status"     : "OPEN",
+                    "Close Bar"  : pd.NaT,
                 })
 
             if e["status"] == "TRAPPED" and curr["low"] <= e["zone_trigger"]:
@@ -299,20 +298,106 @@ def scan_75min(df75: pd.DataFrame):
                 events[e["event_idx"]]["Close Bar"] = ts
 
         if curr["low"] < prev["low"]:
-            entries.append(make(prev["datetime"], prev["low"], prev["high"]))
+            entries.append(make(prev["datetime"], prev["low"], prev["high"], curr["low"]))
 
     return pd.DataFrame(events) if events else pd.DataFrame(), entries
 
 
-def build_75min_chart(df75: pd.DataFrame, trap_row: dict, context_bars: int = 10) -> go.Figure:
-    trap_ts  = pd.Timestamp(trap_row["Trap Bar"])
-    close_ts = pd.Timestamp(trap_row["Close Bar"]) if pd.notna(trap_row.get("Close Bar")) else None
-    entry    = float(trap_row["Entry Level"])
-    sl       = float(trap_row["SL Level"])
-    status   = trap_row["Status"]
+def backtest_75min(df75: pd.DataFrame, buffer: float = 2.0,
+                   qty: int = 1, lot_size: int = 65) -> pd.DataFrame:
+    """
+    Intraday backtest on 75-min bars.
+    Entry  = Your Entry (zone 1/3 trigger) when CLOSED condition fires
+    Target = HTF SL Level (Ref Bar HIGH — where bears were stopped)
+    SL     = Zone LOW - buffer
+    Square-off = end of same trading day (last bar of that day)
+    """
+    _, all_entries = scan_75min(df75)
+    units = qty * lot_size
+    trades = []
 
-    your_entry = sl
-    your_sl    = entry
+    for e in all_entries:
+        if e["status"] != "CLOSED" or e.get("closed_on") is None:
+            continue
+
+        entry_price = round(e["zone_trigger"], 2)
+        target      = round(e["sl"],           2)   # Ref Bar HIGH
+        sl_price    = round(e["zone_low"] - buffer, 2)
+        entry_ts    = pd.Timestamp(e["closed_on"])
+        entry_date  = entry_ts.date()
+
+        # All bars strictly after entry on the SAME calendar day
+        future = df75[
+            (df75["datetime"] > entry_ts) &
+            (df75["datetime"].dt.date == entry_date)
+        ]
+
+        exit_price  = None
+        exit_reason = None
+        exit_ts     = None
+
+        for _, bar in future.iterrows():
+            hit_sl  = bar["low"]  <= sl_price
+            hit_tgt = bar["high"] >= target
+            if hit_sl and hit_tgt:
+                # Both in same bar — assume worst case: SL hit first
+                exit_price  = sl_price
+                exit_reason = "SL"
+                exit_ts     = bar["datetime"]
+                break
+            if hit_sl:
+                exit_price  = sl_price
+                exit_reason = "SL"
+                exit_ts     = bar["datetime"]
+                break
+            if hit_tgt:
+                exit_price  = target
+                exit_reason = "TARGET"
+                exit_ts     = bar["datetime"]
+                break
+
+        # No target/SL hit → intraday square-off at last bar close
+        if exit_price is None:
+            if len(future) > 0:
+                last = future.iloc[-1]
+                exit_price  = round(last["close"], 2)
+                exit_reason = "SQUAREOFF"
+                exit_ts     = last["datetime"]
+            else:
+                # Entry was on last bar of the day — use entry bar close
+                entry_bar = df75[df75["datetime"] == entry_ts]
+                if len(entry_bar) > 0:
+                    exit_price  = round(entry_bar.iloc[0]["close"], 2)
+                    exit_reason = "SQUAREOFF"
+                    exit_ts     = entry_ts
+                else:
+                    continue
+
+        pnl = round((exit_price - entry_price) * units, 2)
+
+        trades.append({
+            "Date"        : entry_date.strftime("%d %b %y"),
+            "Entry Time"  : entry_ts.strftime("%H:%M"),
+            "Exit Time"   : exit_ts.strftime("%H:%M") if hasattr(exit_ts, "strftime") else str(exit_ts),
+            "Entry"       : entry_price,
+            "Target"      : target,
+            "SL"          : sl_price,
+            "Exit Price"  : exit_price,
+            "Exit"        : exit_reason,
+            "P&L (₹)"    : pnl,
+        })
+
+    return pd.DataFrame(trades)
+
+
+def build_75min_chart(df75: pd.DataFrame, trap_row: dict, context_bars: int = 10) -> go.Figure:
+    trap_ts    = pd.Timestamp(trap_row["Trap Bar"])
+    close_ts   = pd.Timestamp(trap_row["Close Bar"]) if pd.notna(trap_row.get("Close Bar")) else None
+    sl_level   = float(trap_row["SL Level"])       # Ref Bar HIGH — bears' SL (trap trigger only)
+    zone_h_val = float(trap_row["Zone High"])      # Ref Bar LOW  — top of zone = where bears entered
+    zone_l_val = float(trap_row["Zone Low"])       # Trap Bar LOW — bottom of zone
+    zone_trig  = float(trap_row["Your Entry"])     # 1/3 from bottom = YOUR ENTRY
+    status     = trap_row["Status"]
     trade_dir  = "BULLISH (BUY)"
 
     idx = df75[df75["datetime"] <= trap_ts].index
@@ -340,65 +425,56 @@ def build_75min_chart(df75: pd.DataFrame, trap_row: dict, context_bars: int = 10
 
     x0, x1 = x_vals.iloc[0], x_vals.iloc[-1]
 
-    # Zone values from trap_row (if present)
-    zone_high    = trap_row.get("Zone High")
-    zone_low     = trap_row.get("Zone Low")
-    zone_trigger = trap_row.get("Zone Trigger")
+    # Bears' SL — orange dashed (Ref Bar HIGH — trap signal only, not zone boundary)
+    fig.add_shape(type="line", x0=x0, x1=x1, y0=sl_level, y1=sl_level,
+                  line=dict(color="#E65100", width=1.2, dash="dash"))
+    fig.add_annotation(x=x0, y=sl_level, text=f"Bears SL Hit {sl_level:.2f}  ",
+                       showarrow=False, xanchor="right", font=dict(color="#E65100", size=10))
 
-    # SL level — orange dashed (where trap fired)
-    fig.add_shape(type="line", x0=x0, x1=x1, y0=sl, y1=sl,
-                  line=dict(color="#E65100", width=1.5, dash="dash"))
-    fig.add_annotation(x=x1, y=sl, text=f"  SL Hit {sl:.2f}",
-                       showarrow=False, xanchor="left", font=dict(color="#E65100", size=11))
+    # Zone shaded band — Zone HIGH (Ref Bar LOW) to Zone LOW (Trap Bar LOW)
+    fig.add_shape(type="rect", x0=x0, x1=x1,
+                  y0=zone_l_val, y1=zone_h_val,
+                  fillcolor="rgba(21,101,192,0.12)",
+                  line=dict(color="#1565C0", width=1))
 
-    # Bear entry (your SL) — red dashed
-    fig.add_shape(type="line", x0=x0, x1=x1, y0=your_sl, y1=your_sl,
-                  line=dict(color="#B71C1C", width=1.5, dash="dash"))
-    fig.add_annotation(x=x0, y=your_sl, text=f"Bear Entry {your_sl:.2f}  ",
-                       showarrow=False, xanchor="right", font=dict(color="#B71C1C", size=11))
+    # Zone HIGH = Ref Bar LOW = where bears entered = top of zone — blue solid
+    fig.add_shape(type="line", x0=x0, x1=x1, y0=zone_h_val, y1=zone_h_val,
+                  line=dict(color="#1565C0", width=1.8))
+    fig.add_annotation(x=x1, y=zone_h_val, text=f"  Zone High {zone_h_val:.2f}",
+                       showarrow=False, xanchor="left", font=dict(color="#1565C0", size=11))
 
-    # Zone — shaded band + boundary lines
-    if zone_high is not None and zone_low is not None:
-        zone_high = float(zone_high)
-        zone_low  = float(zone_low)
-        # shaded zone area
-        fig.add_shape(type="rect", x0=x0, x1=x1,
-                      y0=zone_low, y1=zone_high,
-                      fillcolor="rgba(21,101,192,0.08)",
-                      line=dict(width=0))
-        # zone high line — blue solid
-        fig.add_shape(type="line", x0=x0, x1=x1, y0=zone_high, y1=zone_high,
-                      line=dict(color="#1565C0", width=1.5, dash="solid"))
-        fig.add_annotation(x=x1, y=zone_high, text=f"  Zone High {zone_high:.2f}",
-                           showarrow=False, xanchor="left", font=dict(color="#1565C0", size=11))
-        # zone low line — blue dashed
-        fig.add_shape(type="line", x0=x0, x1=x1, y0=zone_low, y1=zone_low,
-                      line=dict(color="#1565C0", width=1.2, dash="dot"))
-        fig.add_annotation(x=x1, y=zone_low, text=f"  Zone Low {zone_low:.2f}",
-                           showarrow=False, xanchor="left", font=dict(color="#1565C0", size=10))
+    # Zone LOW = Trap Bar LOW = bottom of zone — blue dotted
+    fig.add_shape(type="line", x0=x0, x1=x1, y0=zone_l_val, y1=zone_l_val,
+                  line=dict(color="#1565C0", width=1.2, dash="dot"))
+    fig.add_annotation(x=x1, y=zone_l_val, text=f"  Zone Low {zone_l_val:.2f}",
+                       showarrow=False, xanchor="left", font=dict(color="#1565C0", size=10))
 
-    if zone_trigger is not None:
-        zone_trigger = float(zone_trigger)
-        # 1/3 trigger — green dashed
-        fig.add_shape(type="line", x0=x0, x1=x1, y0=zone_trigger, y1=zone_trigger,
-                      line=dict(color="#1B5E20", width=1.5, dash="dash"))
-        fig.add_annotation(x=x0, y=zone_trigger, text=f"1/3 Trigger {zone_trigger:.2f}  ",
-                           showarrow=False, xanchor="right", font=dict(color="#1B5E20", size=11))
+    # Your Entry = 1/3 from Zone LOW up into zone — green dashed
+    fig.add_shape(type="line", x0=x0, x1=x1, y0=zone_trig, y1=zone_trig,
+                  line=dict(color="#1B5E20", width=2, dash="dash"))
+    fig.add_annotation(x=x1, y=zone_trig, text=f"  Your Entry 1/3 {zone_trig:.2f}",
+                       showarrow=False, xanchor="left", font=dict(color="#1B5E20", size=11))
 
     # Trap vertical line
     trap_x = trap_ts.strftime("%d-%b-%y %H:%M")
     if trap_x in x_vals.values:
-        fig.add_vline(x=trap_x, line_width=1.5, line_dash="dot", line_color="#E65100",
-                      annotation_text="Trap", annotation_position="top",
-                      annotation_font_color="#E65100")
+        fig.add_shape(type="line", x0=trap_x, x1=trap_x, y0=0, y1=1,
+                      xref="x", yref="paper",
+                      line=dict(color="#E65100", width=1.5, dash="dot"))
+        fig.add_annotation(x=trap_x, y=1, yref="paper", text="Trap ▼",
+                           showarrow=False, yanchor="bottom",
+                           font=dict(color="#E65100", size=11))
 
     # Close vertical line
     if close_ts is not None:
         close_x = close_ts.strftime("%d-%b-%y %H:%M")
         if close_x in x_vals.values:
-            fig.add_vline(x=close_x, line_width=1.5, line_dash="dot", line_color="#6B7280",
-                          annotation_text="Closed", annotation_position="top",
-                          annotation_font_color="#6B7280")
+            fig.add_shape(type="line", x0=close_x, x1=close_x, y0=0, y1=1,
+                          xref="x", yref="paper",
+                          line=dict(color="#6B7280", width=1.5, dash="dot"))
+            fig.add_annotation(x=close_x, y=1, yref="paper", text="Closed ▼",
+                               showarrow=False, yanchor="bottom",
+                               font=dict(color="#6B7280", size=11))
 
     status_badge = "🟠 OPEN" if status == "OPEN" else "⚪ CLOSED"
     fig.update_layout(
@@ -419,7 +495,7 @@ def build_75min_chart(df75: pd.DataFrame, trap_row: dict, context_bars: int = 10
 
 
 def _scan_one_contract(label, strike, opt_type, cls, expiry, expiry_api,
-                       from_date, to_date, tf_minutes, chart_context):
+                       from_date, to_date, tf_minutes, chart_context, sl_buffer=2.0):
     """Fetch, resample, scan and render results for one option contract."""
     sym = trading_symbol(strike, opt_type, expiry)
 
@@ -473,8 +549,9 @@ def _scan_one_contract(label, strike, opt_type, cls, expiry, expiry_api,
         for col in ["Trap Bar", "Ref Bar", "Close Bar"]:
             disp[col] = disp[col].apply(
                 lambda x: x.strftime("%d %b %y %H:%M") if pd.notna(x) else "-")
-        for col in ["Entry Level", "SL Level", "Zone High", "Zone Low", "Zone Trigger"]:
-            disp[col] = disp[col].map("{:.2f}".format)
+        for col in ["Bear Entry", "SL Level", "Zone High", "Zone Low", "Your Entry"]:
+            if col in disp.columns:
+                disp[col] = disp[col].map("{:.2f}".format)
 
         def sc(val):
             if val == "OPEN":   return "color:#E65100;font-weight:bold;"
@@ -482,52 +559,91 @@ def _scan_one_contract(label, strike, opt_type, cls, expiry, expiry_api,
             return ""
 
         st.dataframe(
-            disp[["Trap Bar","Ref Bar","Entry Level","SL Level",
-                  "Zone High","Zone Low","Zone Trigger","Status","Close Bar"]]
+            disp[["Trap Bar","Ref Bar","Bear Entry","SL Level",
+                  "Zone High","Zone Low","Your Entry","Status","Close Bar"]]
             .style.map(sc, subset=["Status"]),
             use_container_width=True, height=300, hide_index=True,
         )
 
-        # chart drilldown
-        df_r = df_events.reset_index(drop=True)
-        drop_labels = [
-            f"{row['Trap Bar'].strftime('%d %b %y %H:%M')}  |  BEARS TRAPPED  "
-            f"|  Entry {row['Entry Level']:.2f}  SL {row['SL Level']:.2f}  |  {row['Status']}"
-            for _, row in df_r.iterrows()
-        ]
-        sel_label = st.selectbox("Select trap to chart", drop_labels,
-                                 key=f"sel_{sym}", index=0)
-        sel_trap  = df_r.iloc[drop_labels.index(sel_label)].to_dict()
+        # ── Backtest report ───────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### Backtest Report  *(Qty 1 × Lot 65 = 65 units | Intraday)*")
+        bt = backtest_75min(df_tf, buffer=sl_buffer, qty=1, lot_size=65)
+        if bt.empty:
+            st.info("No closed trades to backtest — no CLOSED traps in this window.")
+        else:
+            wins       = int((bt["P&L (₹)"] > 0).sum())
+            losses     = int((bt["P&L (₹)"] <= 0).sum())
+            total_pnl  = round(bt["P&L (₹)"].sum(), 2)
+            win_rate   = round(wins / len(bt) * 100, 1) if len(bt) else 0
+            best       = round(bt["P&L (₹)"].max(), 2)
+            worst      = round(bt["P&L (₹)"].min(), 2)
 
-        if st.button(f"Show Chart — {sym}", type="primary", key=f"btn_{sym}"):
-            fig = build_75min_chart(df_tf, sel_trap, context_bars=chart_context)
-            st.plotly_chart(fig, use_container_width=True)
-            status = sel_trap["Status"]
-            s_col  = "#E65100" if status == "OPEN" else "#6B7280"
-            st.markdown(f"""
-<div style="background:#F5F7FA;border:1px solid #DDE1E7;border-radius:8px;
-            padding:14px 22px;margin-top:10px;display:flex;gap:36px;flex-wrap:wrap;">
-  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Contract</div>
-       <div style="color:#1565C0;font-size:18px;font-weight:bold;">{sym}</div></div>
-  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Who Trapped</div>
-       <div style="color:#1B5E20;font-size:18px;font-weight:bold;">BEARS</div></div>
-  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Signal</div>
-       <div style="color:#1B5E20;font-size:18px;font-weight:bold;">BULLISH (BUY)</div></div>
-  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Your Entry</div>
-       <div style="color:#1565C0;font-size:18px;font-weight:bold;">{sel_trap['SL Level']:.2f}</div></div>
-  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Your SL</div>
-       <div style="color:#B71C1C;font-size:18px;font-weight:bold;">{sel_trap['Entry Level']:.2f}</div></div>
-  <div><div style="color:#6B7280;font-size:11px;text-transform:uppercase;">Status</div>
-       <div style="color:{s_col};font-size:18px;font-weight:bold;">{status}</div></div>
-</div>""", unsafe_allow_html=True)
+            mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
+            card(mc1, "Total Trades", str(len(bt)),     "blue")
+            card(mc2, "Wins",         str(wins),        "green")
+            card(mc3, "Losses",       str(losses),      "red")
+            card(mc4, "Win Rate",     f"{win_rate}%",   "green" if win_rate >= 50 else "red")
+            card(mc5, "Net P&L",      f"₹{total_pnl:,.0f}", "green" if total_pnl >= 0 else "red")
+            card(mc6, "Best / Worst", f"₹{best:,.0f} / ₹{worst:,.0f}", "")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            def pnl_color(val):
+                if isinstance(val, (int, float)):
+                    return "color:#1B5E20;font-weight:bold;" if val > 0 else "color:#B71C1C;font-weight:bold;"
+                return ""
+
+            def exit_color(val):
+                colors = {"TARGET": "color:#1B5E20;font-weight:bold;",
+                          "SL":     "color:#B71C1C;font-weight:bold;",
+                          "SQUAREOFF": "color:#6B7280;"}
+                return colors.get(val, "")
+
+            bt_disp = bt.copy()
+            st.dataframe(
+                bt_disp.style
+                    .map(pnl_color,  subset=["P&L (₹)"])
+                    .map(exit_color, subset=["Exit"]),
+                use_container_width=True,
+                height=min(40 * len(bt) + 40, 420),
+                hide_index=True,
+            )
+
+            # Cumulative P&L
+            bt["Cumulative"] = bt["P&L (₹)"].cumsum()
+            fig_pnl = go.Figure()
+            fig_pnl.add_trace(go.Scatter(
+                x=list(range(1, len(bt) + 1)),
+                y=bt["Cumulative"],
+                mode="lines+markers",
+                line=dict(color="#1565C0", width=2),
+                marker=dict(color=["#1B5E20" if p > 0 else "#B71C1C" for p in bt["P&L (₹)"]],
+                            size=8),
+                fill="tozeroy",
+                fillcolor="rgba(21,101,192,0.08)",
+            ))
+            fig_pnl.update_layout(
+                title="Cumulative P&L  (₹)",
+                xaxis_title="Trade #",
+                yaxis_title="₹",
+                paper_bgcolor="#FFFFFF",
+                plot_bgcolor="#FAFBFC",
+                height=280,
+                margin=dict(l=40, r=20, t=40, b=40),
+            )
+            st.plotly_chart(fig_pnl, use_container_width=True)
     else:
         st.info(f"No bearish traps detected for {sym} in this window.")
 
     if open_traps:
         st.markdown("**Open traps — market NOT returned to entry yet:**")
-        rows = [{"Trapped On"  : e["trapped_on"].strftime("%d %b %y %H:%M"),
-                 "Entry Level" : f"{e['entry']:.2f}",
-                 "SL Level"    : f"{e['sl']:.2f}"}
+        rows = [{"Trapped On"   : e["trapped_on"].strftime("%d %b %y %H:%M"),
+                 "Bear Entry"   : f"{e['entry']:.2f}",
+                 "Your Entry"   : f"{e['sl']:.2f}",
+                 "Zone High"    : f"{e['zone_high']:.2f}" if e.get("zone_high") else "-",
+                 "Zone Low"     : f"{e['zone_low']:.2f}"  if e.get("zone_low")  else "-",
+                 "Zone Trigger" : f"{e['zone_trigger']:.2f}" if e.get("zone_trigger") else "-"}
                 for e in sorted(open_traps, key=lambda x: x["trapped_on"])]
         st.dataframe(pd.DataFrame(rows), use_container_width=True,
                      height=180, hide_index=True)
@@ -542,7 +658,7 @@ def _scan_one_contract(label, strike, opt_type, cls, expiry, expiry_api,
                      use_container_width=True, height=350, hide_index=True)
 
 
-def render_option_scanner(round_step: int, tf_minutes: int, weeks_back: int, chart_context: int):
+def render_option_scanner(round_step: int, tf_minutes: int, weeks_back: int, chart_context: int, sl_buffer: float = 2.0):
     sec("STEP 1 : Prev-Day Nifty Spot")
 
     with st.spinner("Fetching prev-day Nifty spot..."):
@@ -613,16 +729,16 @@ def render_option_scanner(round_step: int, tf_minutes: int, weeks_back: int, cha
     ])
     with tab_s1ce:
         _scan_one_contract("S1 CE", s1, "CE", "green",
-                           expiry, expiry_api, from_date, to_date, tf_minutes, chart_context)
+                           expiry, expiry_api, from_date, to_date, tf_minutes, chart_context, sl_buffer)
     with tab_s2ce:
         _scan_one_contract("S2 CE", s2, "CE", "green",
-                           expiry, expiry_api, from_date, to_date, tf_minutes, chart_context)
+                           expiry, expiry_api, from_date, to_date, tf_minutes, chart_context, sl_buffer)
     with tab_r1pe:
         _scan_one_contract("R1 PE", r1, "PE", "red",
-                           expiry, expiry_api, from_date, to_date, tf_minutes, chart_context)
+                           expiry, expiry_api, from_date, to_date, tf_minutes, chart_context, sl_buffer)
     with tab_r2pe:
         _scan_one_contract("R2 PE", r2, "PE", "red",
-                           expiry, expiry_api, from_date, to_date, tf_minutes, chart_context)
+                           expiry, expiry_api, from_date, to_date, tf_minutes, chart_context, sl_buffer)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -909,6 +1025,8 @@ with st.sidebar:
                                     [1, 2, 3, 4], index=1,
                                     format_func=lambda w: f"Prev {w} week(s) + current")
         chart_ctx    = st.slider("Chart context (bars)", 5, 30, 10)
+        sl_buffer    = st.number_input("SL Buffer (pts)", value=2.0, step=0.5, min_value=0.0,
+                                        help="Added below Zone LOW for stop-loss")
     else:
         weeks        = st.selectbox("Data Range (weeks)", [4, 8, 13, 26, 52], index=4,
                                     format_func=lambda w: f"{w} weeks")
@@ -944,7 +1062,7 @@ HEADERS["Accept"] = "application/json"
 if active_tab == "Option 75-min Traps":
     st.markdown(f"# Option {tf_minutes}-min Trap Scanner")
     st.markdown(f"*Prev-day Nifty → Pivot/R1/R2/S1/S2 (×{round_step}) → S1/S2 CE + R1/R2 PE → {tf_minutes}-min bars → Bearish trap detection*")
-    render_option_scanner(round_step, tf_minutes, weeks_back, chart_ctx)
+    render_option_scanner(round_step, tf_minutes, weeks_back, chart_ctx, sl_buffer)
 else:
     st.markdown("# Daily Nifty Trap Scanner  *(52-week validation)*")
     st.markdown("*Validates trap logic on Nifty 50 daily candles*")
