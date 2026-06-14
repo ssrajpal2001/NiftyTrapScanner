@@ -373,19 +373,17 @@ def render_option_scanner(itm_offset: int, weeks_back: int, chart_context: int):
     pivot     = round50(pivot_raw)
     ce_strike = pivot - itm_offset
     pe_strike = pivot + itm_offset
-    atm       = round50(spot["close"])
     expiry    = next_tuesday(date.today())
     expiry_api = expiry.strftime("%Y-%m-%d")
 
-    c1,c2,c3,c4,c5,c6,c7,c8 = st.columns(8)
+    c1,c2,c3,c4,c5,c6,c7 = st.columns(7)
     card(c1, "Prev Day",         spot["date"],              "blue")
     card(c2, "Prev High",        f"{spot['high']:,.2f}",    "green")
     card(c3, "Prev Low",         f"{spot['low']:,.2f}",     "red")
     card(c4, "Prev Close",       f"{spot['close']:,.2f}",   "")
     card(c5, "Pivot (raw)",      f"{pivot_raw:,.2f}",       "")
-    card(c6, "Pivot (×50)",      f"{pivot:,}",              "orange")
-    card(c7, "ATM Strike",       f"{atm:,}",                "blue")
-    card(c8, "Expiry (Tue)",     expiry_label(expiry),      "blue")
+    card(c6, "Pivot ×50 = ATM",  f"{pivot:,}",              "orange")
+    card(c7, "Expiry (Tue)",     expiry_label(expiry),      "blue")
 
     st.markdown("<br>", unsafe_allow_html=True)
     sec(f"STEP 3 : ITM Strikes  (offset ±{itm_offset} pts from Pivot)")
