@@ -62,6 +62,14 @@ div[data-testid="stDataFrame"] { border: 1px solid #DDE1E7; border-radius: 6px; 
 
 # ── token — sidebar input wins, then secrets.toml, then session state ──────────
 # Token is resolved at render time so sidebar input takes effect immediately.
+_FALLBACK_TOKEN = (
+    "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ"
+    ".eyJzdWIiOiI0SkNIRDciLCJqdGkiOiI2YTJlNWEyOTFiZTRjMDQyZTg1YTg3MTMiLC"
+    "Jpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0IjoxNzgxND"
+    "IyNjMzLCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3ODE0NzQ0MD"
+    "B9.QEijmZUpQ8RRUjpJf3dKyRaXZQ_UJfW_gnXVK0p6TS8"
+)
+
 def _get_token() -> str:
     # 1. sidebar live input (stored in session state after user submits)
     if st.session_state.get("live_token"):
@@ -73,7 +81,8 @@ def _get_token() -> str:
             return t
     except Exception:
         pass
-    return ""
+    # 3. hardcoded fallback (for R&D — update daily)
+    return _FALLBACK_TOKEN
 
 HEADERS: dict = {}   # populated after sidebar renders
 
