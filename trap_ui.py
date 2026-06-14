@@ -533,28 +533,18 @@ def render_option_scanner(round_step: int, tf_minutes: int, weeks_back: int, cha
         card(cols[i*2+1],   f"{name} ×{round_step}", f"{rounded:,}", cls)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    sec(f"STEP 3 : CE + PE Trap Scan for each level  |  {tf_minutes}-min  |  BEARISH TRAPS only")
+    sec(f"STEP 3 : ATM CE + ATM PE Trap Scan  |  {tf_minutes}-min  |  BEARISH TRAPS only")
+    st.caption(f"ATM Strike = Pivot ×{round_step} = **{pivot:,}**  |  R1/R2/S1/S2 shown above for reference only")
 
-    # 5 levels × 2 sides = up to 10 contracts
-    levels = [
-        ("Pivot (ATM)", pivot),
-        ("R1",          r1),
-        ("R2",          r2),
-        ("S1",          s1),
-        ("S2",          s2),
-    ]
-
-    for level_name, strike in levels:
-        with st.expander(f"▸ {level_name}  —  Strike {strike:,}", expanded=(level_name == "Pivot (ATM)")):
-            t1, t2 = st.tabs([f"CE  {strike}CE", f"PE  {strike}PE"])
-            with t1:
-                _scan_one_contract(f"{level_name} CE", strike, "CE", "green",
-                                   expiry, expiry_api, from_date, to_date,
-                                   tf_minutes, chart_context)
-            with t2:
-                _scan_one_contract(f"{level_name} PE", strike, "PE", "red",
-                                   expiry, expiry_api, from_date, to_date,
-                                   tf_minutes, chart_context)
+    t1, t2 = st.tabs([f"ATM CE  —  {pivot:,}CE", f"ATM PE  —  {pivot:,}PE"])
+    with t1:
+        _scan_one_contract("ATM CE", pivot, "CE", "green",
+                           expiry, expiry_api, from_date, to_date,
+                           tf_minutes, chart_context)
+    with t2:
+        _scan_one_contract("ATM PE", pivot, "PE", "red",
+                           expiry, expiry_api, from_date, to_date,
+                           tf_minutes, chart_context)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
