@@ -75,8 +75,11 @@ def scan_htf(df: pd.DataFrame) -> tuple:
                     "Close Bar"  : pd.NaT,
                 })
 
-            # ── CLOSE fires when price returns to LTF Ref Bar LOW (bear entry) ──
-            if e["status"] == "TRAPPED" and curr["low"] <= e["entry"]:
+            # ── CLOSE fires when price returns to bear entry — but NOT on same bar as trap.
+            # A same-bar trap+close is a ghost signal: the zone resolved before any entry.
+            if (e["status"] == "TRAPPED"
+                    and curr["low"] <= e["entry"]
+                    and ts != e["trapped_on"]):
                 e["status"]    = "CLOSED"
                 e["closed_on"] = ts
                 events[e["event_idx"]]["Status"]    = "CLOSED"
@@ -125,6 +128,376 @@ def scan_ltf(df: pd.DataFrame,
         e["htf_target"]    = htf_target
 
     return df_events, entries
+
+
+def scan_htf_spot(df: pd.DataFrame) -> tuple:
+    """
+    Scan any-timeframe Nifty SPOT bars for BOTH bearish AND bullish traps.
+
+    Bearish trap (bears shorted spot → got squeezed → spot going UP → CE bias)
+        Detection : curr LOW < prev LOW
+        Entry     : prev LOW  (where bears entered short)
+        SL        : prev HIGH (bears' stop loss)
+        Trap fires: curr HIGH > SL
+        Close     : curr LOW  ≤ entry
+        Direction : "BULLISH"  → focus CE
+
+    Bullish trap (bulls bought spot → got squeezed → spot going DOWN → PE bias)
+        Detection : curr HIGH > prev HIGH
+        Entry     : prev HIGH (where bulls entered long)
+        SL        : prev LOW  (bulls' stop loss)
+        Trap fires: curr LOW  < SL
+        Close     : curr HIGH ≥ entry
+        Direction : "BEARISH"  → focus PE
+
+    Returns
+    -------
+    events  : pd.DataFrame  — one row per TRAPPED event with Status + Direction
+    entries : list[dict]    — raw state dicts (includes ACTIVE entries)
+    """
+    bear_entries = []   # bearish trap candidates
+    bull_entries = []   # bullish trap candidates
+    events       = []
+
+    def make_bear(ref_ts, entry, sl, next_low):
+        return {
+            "kind"      : "BEAR",
+            "direction" : "BULLISH",   # bears trapped → spot up → CE
+            "ref_ts"    : ref_ts,
+            "entry"     : entry,       # prev LOW  (where bears shorted)
+            "sl"        : sl,          # prev HIGH (bears' stop)
+            "zone_high" : entry,
+            "zone_low"  : next_low,
+            "status"    : "ACTIVE",
+            "trapped_on": None,
+            "closed_on" : None,
+            "event_idx" : None,
+        }
+
+    def make_bull(ref_ts, entry, sl, next_high):
+        return {
+            "kind"      : "BULL",
+            "direction" : "BEARISH",   # bulls trapped → spot down → PE
+            "ref_ts"    : ref_ts,
+            "entry"     : entry,       # prev HIGH (where bulls bought)
+            "sl"        : sl,          # prev LOW  (bulls' stop)
+            "zone_high" : next_high,
+            "zone_low"  : entry,
+            "status"    : "ACTIVE",
+            "trapped_on": None,
+            "closed_on" : None,
+            "event_idx" : None,
+        }
+
+    for i in range(1, len(df)):
+        prev = df.iloc[i - 1]
+        curr = df.iloc[i]
+        ts   = curr["datetime"]
+
+        # ── update existing bear entries ───────────────────────────────────────
+        for e in bear_entries:
+            if e["status"] == "CLOSED":
+                continue
+            if e["status"] == "ACTIVE" and curr["high"] > e["sl"]:
+                e["status"]     = "TRAPPED"
+                e["trapped_on"] = ts
+                e["event_idx"]  = len(events)
+                events.append({
+                    "Trap Bar"  : ts,
+                    "Ref Bar"   : e["ref_ts"],
+                    "Kind"      : "BEAR TRAP",
+                    "Direction" : e["direction"],
+                    "Entry"     : round(e["entry"], 2),
+                    "SL Level"  : round(e["sl"],    2),
+                    "Zone High" : round(e["zone_high"], 2),
+                    "Zone Low"  : round(e["zone_low"],  2),
+                    "Status"    : "OPEN",
+                    "Close Bar" : pd.NaT,
+                })
+            if (e["status"] == "TRAPPED"
+                    and curr["low"] <= e["entry"]
+                    and ts != e["trapped_on"]):
+                e["status"]    = "CLOSED"
+                e["closed_on"] = ts
+                events[e["event_idx"]]["Status"]    = "CLOSED"
+                events[e["event_idx"]]["Close Bar"] = ts
+
+        # ── update existing bull entries ───────────────────────────────────────
+        for e in bull_entries:
+            if e["status"] == "CLOSED":
+                continue
+            if e["status"] == "ACTIVE" and curr["low"] < e["sl"]:
+                e["status"]     = "TRAPPED"
+                e["trapped_on"] = ts
+                e["event_idx"]  = len(events)
+                events.append({
+                    "Trap Bar"  : ts,
+                    "Ref Bar"   : e["ref_ts"],
+                    "Kind"      : "BULL TRAP",
+                    "Direction" : e["direction"],
+                    "Entry"     : round(e["entry"], 2),
+                    "SL Level"  : round(e["sl"],    2),
+                    "Zone High" : round(e["zone_high"], 2),
+                    "Zone Low"  : round(e["zone_low"],  2),
+                    "Status"    : "OPEN",
+                    "Close Bar" : pd.NaT,
+                })
+            if (e["status"] == "TRAPPED"
+                    and curr["high"] >= e["entry"]
+                    and ts != e["trapped_on"]):
+                e["status"]    = "CLOSED"
+                e["closed_on"] = ts
+                events[e["event_idx"]]["Status"]    = "CLOSED"
+                events[e["event_idx"]]["Close Bar"] = ts
+
+        # ── detect new setups on this bar ──────────────────────────────────────
+        if curr["low"] < prev["low"]:
+            bear_entries.append(
+                make_bear(prev["datetime"], prev["low"], prev["high"], curr["low"])
+            )
+        if curr["high"] > prev["high"]:
+            bull_entries.append(
+                make_bull(prev["datetime"], prev["high"], prev["low"], curr["high"])
+            )
+
+    all_entries = bear_entries + bull_entries
+    df_events   = pd.DataFrame(events) if events else pd.DataFrame()
+    return df_events, all_entries
+
+
+def spot_bias(df_events: pd.DataFrame) -> str:
+    """
+    Derive the current spot bias from scan_htf_spot() events.
+
+    Returns one of: "BULLISH" (CE focus), "BEARISH" (PE focus), or "NEUTRAL"
+    Uses the most recently trapped event that is still OPEN.
+    """
+    if df_events.empty:
+        return "NEUTRAL"
+    open_traps = df_events[df_events["Status"] == "OPEN"]
+    if open_traps.empty:
+        return "NEUTRAL"
+    latest = open_traps.iloc[-1]
+    return latest["Direction"]  # "BULLISH" or "BEARISH"
+
+
+def scan_ltf_bull(df: pd.DataFrame,
+                  htf_zone_high: float,
+                  htf_zone_low: float,
+                  htf_ref_bar: str = "",
+                  htf_trap_bar: str = "",
+                  htf_target: float = 0.0) -> tuple:
+    """
+    Scan 5-min SPOT bars for a BULLISH trap INSIDE an HTF bullish zone.
+
+    HTF bullish zone layout
+        htf_zone_high : next bar HIGH  (upper bound of zone)
+        htf_zone_low  : ref bar HIGH   (lower bound = where HTF bulls entered)
+        htf_target    : HTF bulls' SL  (= ref bar LOW — downside target for PE)
+
+    5-min logic:
+        Detection  : curr HIGH > prev HIGH  → 5-min bulls bought here
+        Trap fires : curr LOW  < prev LOW   → 5-min bulls stopped out
+        Close      : curr HIGH ≥ prev HIGH  (price returns to 5-min bull entry)
+        → CLOSED timestamp = PE entry signal (spot re-testing failed supply)
+
+    Returns (df_events, entries) — same contract as scan_ltf().
+    """
+    zone_df = df[
+        (df["high"] >= htf_zone_low) &
+        (df["close"] <= htf_zone_high * 1.05)
+    ].copy()
+
+    if len(zone_df) < 2:
+        return pd.DataFrame(), []
+
+    zone_df = zone_df.reset_index(drop=True)
+    entries = []
+    events  = []
+
+    for i in range(1, len(zone_df)):
+        prev = zone_df.iloc[i - 1]
+        curr = zone_df.iloc[i]
+        ts   = curr["datetime"]
+
+        for e in entries:
+            if e["status"] == "CLOSED":
+                continue
+            # Bull trap: LOW falls below 5-min bull's stop (prev LOW)
+            if e["status"] == "ACTIVE" and curr["low"] < e["sl"]:
+                e["status"]     = "TRAPPED"
+                e["trapped_on"] = ts
+                e["event_idx"]  = len(events)
+                events.append({
+                    "Trap Bar"   : ts,
+                    "Ref Bar"    : e["ref_ts"],
+                    "Bull Entry" : round(e["entry"],        2),
+                    "SL Level"   : round(e["sl"],           2),
+                    "Zone High"  : round(e["zone_high"],    2),
+                    "Zone Low"   : round(e["zone_low"],     2),
+                    "Your Entry" : round(e["zone_trigger"], 2),
+                    "Status"     : "OPEN",
+                    "Close Bar"  : pd.NaT,
+                })
+            # Close: price bounces back to 5-min bull entry (failed supply re-test)
+            if e["status"] == "TRAPPED" and curr["high"] >= e["entry"]:
+                e["status"]    = "CLOSED"
+                e["closed_on"] = ts
+                events[e["event_idx"]]["Status"]    = "CLOSED"
+                events[e["event_idx"]]["Close Bar"] = ts
+
+        # New 5-min bullish setup: HIGH > prev HIGH
+        if curr["high"] > prev["high"]:
+            zone_high_ltf = curr["high"]
+            zone_low_ltf  = prev["high"]                              # 5-min bull entry
+            zone_trigger  = zone_high_ltf - (zone_high_ltf - zone_low_ltf) / 3
+            entries.append({
+                "ref_ts"       : prev["datetime"],
+                "entry"        : prev["high"],   # 5-min ref bar HIGH (bull entry)
+                "sl"           : prev["low"],    # 5-min ref bar LOW  (bull's stop)
+                "zone_high"    : zone_high_ltf,
+                "zone_low"     : zone_low_ltf,
+                "zone_trigger" : zone_trigger,
+                "status"       : "ACTIVE",
+                "trapped_on"   : None,
+                "closed_on"    : None,
+                "event_idx"    : None,
+                "htf_ref_bar"  : htf_ref_bar,
+                "htf_trap_bar" : htf_trap_bar,
+                "htf_zone_high": htf_zone_high,
+                "htf_zone_low" : htf_zone_low,
+                "htf_target"   : htf_target,
+            })
+
+    df_events = pd.DataFrame(events) if events else pd.DataFrame()
+    return df_events, entries
+
+
+def simulate_today_trades(all_entries: list, df1: pd.DataFrame,
+                          sl_buffer: float = 3.0,
+                          lot_size: int = 20, qty: int = 2) -> list:
+    """
+    Replay today's HTF zones against 1-min bars to show what would have happened.
+    For each CLOSED zone (entry signal fired today), simulate forward:
+      Entry     = zone_trigger (your buy level)
+      SL        = zone_low - sl_buffer
+      T1        = zone.sl (ref bar HIGH = bears' target)
+      units     = qty * lot_size (2 lots)
+      T1 units  = units // 2
+
+    Returns list of dicts, one per simulated trade:
+      sym, entry_price, entry_time, sl, t1, result, exit_price, exit_time, pnl
+    """
+    from datetime import date
+    today = date.today()
+    units = qty * lot_size
+    t1_units = units // 2
+    rem_units = units - t1_units
+    trades = []
+
+    if df1 is None or df1.empty:
+        return trades
+
+    # Normalize df1 index to naive timestamps for comparison
+    df1_work = df1.copy()
+    if df1_work.index.tz is not None:
+        df1_work.index = df1_work.index.tz_localize(None)
+
+    eligible = [
+        e for e in all_entries
+        if e["status"] == "CLOSED"
+        and e.get("closed_on")
+        and pd.Timestamp(e["closed_on"]).date() == today
+    ]
+
+    for e in eligible:
+        entry_price = round(e["zone_trigger"], 2)
+        sl_price    = round(e["zone_low"] - sl_buffer, 2)
+        t1_price    = round(e["sl"], 2)
+        closed_ts   = pd.Timestamp(e["closed_on"])
+        if closed_ts.tzinfo is not None:
+            closed_ts = closed_ts.tz_localize(None)
+
+        # Bars after entry signal
+        df_fwd = df1_work[df1_work.index > closed_ts]
+        if df_fwd.empty:
+            trades.append({
+                "entry_price": entry_price, "entry_time": closed_ts,
+                "sl": sl_price, "t1": t1_price,
+                "result": "OPEN", "exit_price": None, "exit_time": None,
+                "pnl": 0, "units": units,
+            })
+            continue
+
+        t1_hit = False
+        t1_exit_price = t1_price
+        result = "OPEN"
+        exit_price = None
+        exit_time  = None
+        pnl = 0
+
+        for bar_ts, bar in df_fwd.iterrows():
+            # SL check first (worst case)
+            if bar["low"] <= sl_price:
+                if not t1_hit:
+                    # Full SL — all units lost
+                    result = "SL_HIT"
+                    exit_price = sl_price
+                    exit_time  = bar_ts
+                    pnl = round((sl_price - entry_price) * units, 2)
+                else:
+                    # SL on remaining units after T1 booked
+                    result = "T1+SL"
+                    exit_price = sl_price
+                    exit_time  = bar_ts
+                    t1_pnl  = round((t1_exit_price - entry_price) * t1_units, 2)
+                    rem_pnl = round((sl_price - entry_price) * rem_units, 2)
+                    pnl = round(t1_pnl + rem_pnl, 2)
+                break
+            # T1 check
+            if not t1_hit and bar["high"] >= t1_price:
+                t1_hit = True
+                t1_exit_price = t1_price
+            # If T1 hit and remainder still running — keep going
+        else:
+            # Session ended without SL hit
+            last_bar = df_fwd.iloc[-1]
+            if t1_hit:
+                result = "T1+RUNNING"
+                t1_pnl  = round((t1_exit_price - entry_price) * t1_units, 2)
+                rem_pnl = round((last_bar["close"] - entry_price) * rem_units, 2)
+                pnl = round(t1_pnl + rem_pnl, 2)
+                exit_price = last_bar["close"]
+                exit_time  = df_fwd.index[-1]
+            else:
+                result = "OPEN/SQ_OFF"
+                exit_price = last_bar["close"]
+                exit_time  = df_fwd.index[-1]
+                pnl = round((exit_price - entry_price) * units, 2)
+
+        trades.append({
+            "entry_price": entry_price,
+            "entry_time" : closed_ts,
+            "sl"         : sl_price,
+            "t1"         : t1_price,
+            "result"     : result,
+            "exit_price" : exit_price,
+            "exit_time"  : exit_time,
+            "pnl"        : pnl,
+            "units"      : units,
+        })
+
+    return sorted(trades, key=lambda t: t["entry_time"])
+
+
+def select_best_ltf_entry(ltf_entries: list) -> dict | None:
+    """
+    From scan_ltf() entries, return the CLOSED entry with the lowest zone_low
+    (most conservative stop, deepest inside the HTF zone).
+    Returns None if no CLOSED entry exists.
+    """
+    closed = [e for e in ltf_entries if e["status"] == "CLOSED"]
+    return min(closed, key=lambda e: e["zone_low"]) if closed else None
 
 
 # ── Intraday backtest ──────────────────────────────────────────────────────────
@@ -293,6 +666,8 @@ PHASE3_SCENARIOS = {
         "t1_enabled": False,
         "hard_floor_enabled": False,
         "breakeven_trail": False,
+        "max_hold_minutes": None,
+        "min_progress_pct": 0.0,
         "description": "Main SL = counterpart fires. No T1 partial, no hard floor. (Current logic)",
     },
     "Scenario A: T1 + Wait CP": {
@@ -300,6 +675,8 @@ PHASE3_SCENARIOS = {
         "t1_enabled": True,
         "hard_floor_enabled": False,
         "breakeven_trail": False,
+        "max_hold_minutes": None,
+        "min_progress_pct": 0.0,
         "description": "Book 50% at T1 (HTF target). Hold remaining until counterpart fires.",
     },
     "Scenario B: T1 + Breakeven SL": {
@@ -307,6 +684,8 @@ PHASE3_SCENARIOS = {
         "t1_enabled": True,
         "hard_floor_enabled": False,
         "breakeven_trail": True,
+        "max_hold_minutes": None,
+        "min_progress_pct": 0.0,
         "description": "Book 50% at T1. Move SL to entry (breakeven) for remaining 50%.",
     },
     "Scenario C: T1 + Hard Floor SL": {
@@ -314,6 +693,8 @@ PHASE3_SCENARIOS = {
         "t1_enabled": True,
         "hard_floor_enabled": True,
         "breakeven_trail": False,
+        "max_hold_minutes": None,
+        "min_progress_pct": 0.0,
         "description": "Book 50% at T1. Hard floor exits ALL units if bar close < zone_low×0.97.",
     },
     "Scenario D: T1 + Breakeven + Hard Floor": {
@@ -321,6 +702,8 @@ PHASE3_SCENARIOS = {
         "t1_enabled": True,
         "hard_floor_enabled": True,
         "breakeven_trail": True,
+        "max_hold_minutes": None,
+        "min_progress_pct": 0.0,
         "description": "Book 50% at T1. Breakeven SL for remaining. Hard floor as safety net.",
     },
     "Scenario E: Hard Floor only (no T1)": {
@@ -328,7 +711,36 @@ PHASE3_SCENARIOS = {
         "t1_enabled": False,
         "hard_floor_enabled": True,
         "breakeven_trail": False,
+        "max_hold_minutes": None,
+        "min_progress_pct": 0.0,
         "description": "Hard floor SL only, no T1 partial. Exits if bar close < zone_low×0.97.",
+    },
+    "Scenario F: T1 + Hard Floor + Time Exit": {
+        "qty": 2,
+        "t1_enabled": True,
+        "hard_floor_enabled": True,
+        "breakeven_trail": False,
+        "max_hold_minutes": 60,
+        "min_progress_pct": 0.0,
+        "description": "Scenario C + TIME_EXIT if T1 not hit within 60 min of entry.",
+    },
+    "Scenario G: T1 + Hard Floor + Progress Check": {
+        "qty": 2,
+        "t1_enabled": True,
+        "hard_floor_enabled": True,
+        "breakeven_trail": False,
+        "max_hold_minutes": None,
+        "min_progress_pct": 0.30,
+        "description": "Scenario C + PROGRESS_EXIT if price < 30% toward T1 at T+30 min.",
+    },
+    "Scenario H: T1 + Hard Floor + Time + Progress": {
+        "qty": 2,
+        "t1_enabled": True,
+        "hard_floor_enabled": True,
+        "breakeven_trail": False,
+        "max_hold_minutes": 60,
+        "min_progress_pct": 0.30,
+        "description": "Scenario C + both TIME_EXIT (60 min) and PROGRESS_EXIT (30%@T+30).",
     },
 }
 
@@ -348,6 +760,9 @@ def backtest_phase3(df_active: pd.DataFrame,
                     hard_floor_enabled: bool = False,
                     hard_floor_pct: float = 3.0,
                     breakeven_trail: bool = False,
+                    max_hold_minutes: int | None = None,
+                    min_progress_pct: float = 0.0,
+                    min_progress_check_minutes: int = 30,
                     ) -> pd.DataFrame:
     """
     Phase 3 backtest with cross-pair SL/target rules.
@@ -421,18 +836,20 @@ def backtest_phase3(df_active: pd.DataFrame,
             (df_active["datetime"].dt.date == entry_date)
         ]
 
-        hard_floor   = round(e["zone_low"] * (1 - hard_floor_pct / 100), 2)
-        units_open   = units
-        t1_booked    = False
-        t1_units     = 0
-        t1_pnl       = 0.0
-        exit_price   = None
-        exit_reason  = None
-        exit_ts      = None
-        partial_note = ""
+        hard_floor       = round(e["zone_low"] * (1 - hard_floor_pct / 100), 2)
+        units_open       = units
+        t1_booked        = False
+        t1_units         = 0
+        t1_pnl           = 0.0
+        exit_price       = None
+        exit_reason      = None
+        exit_ts          = None
+        partial_note     = ""
+        progress_checked = False   # PROGRESS_EXIT fires only once at T+N
 
         for _, bar in future.iterrows():
-            bar_ts = pd.Timestamp(bar["datetime"])
+            bar_ts    = pd.Timestamp(bar["datetime"])
+            mins_open = (bar_ts - entry_ts).total_seconds() / 60
 
             # 1. Hard floor SL — exit ALL remaining if bar close < floor
             if hard_floor_enabled and bar["close"] < hard_floor:
@@ -456,21 +873,41 @@ def backtest_phase3(df_active: pd.DataFrame,
                 t1_booked  = True
                 partial_note = f"T1@{target}"
                 if units_open <= 0:
-                    # All units booked at T1 — trade fully closed
                     exit_price  = target
                     exit_reason = "TARGET"
                     exit_ts     = bar_ts
                     break
                 continue  # remaining units still tracking
 
-            # 4. Counterpart SL — exit remaining at this bar's close
+            # 4a. Time exit — if T1 not booked and trade open >= max_hold_minutes
+            if max_hold_minutes and not t1_booked and mins_open >= max_hold_minutes:
+                exit_price  = round(bar["close"], 2)
+                exit_reason = "TIME_EXIT"
+                exit_ts     = bar_ts
+                break
+
+            # 4b. Progress exit — fires ONCE at T+min_progress_check_minutes
+            if (min_progress_pct > 0 and not t1_booked
+                    and not progress_checked
+                    and mins_open >= min_progress_check_minutes):
+                progress_checked = True
+                reward_range = target - entry_price
+                if reward_range > 0:
+                    progress = (bar["close"] - entry_price) / reward_range
+                    if progress < min_progress_pct:
+                        exit_price  = round(bar["close"], 2)
+                        exit_reason = "PROGRESS_EXIT"
+                        exit_ts     = bar_ts
+                        break
+
+            # 5. Counterpart SL — exit remaining at this bar's close
             if next_cp_ts and bar_ts >= next_cp_ts:
                 exit_price  = round(bar["close"], 2)
                 exit_reason = "SL"
                 exit_ts     = bar_ts
                 break
 
-            # 5. Full target reached (no partial booking active)
+            # 6. Full target reached (no partial booking active)
             if not t1_enabled and bar["high"] >= target:
                 exit_price  = target
                 exit_reason = "TARGET"
@@ -552,6 +989,8 @@ def run_scenario_comparison(df_active: pd.DataFrame,
             min_rr=min_rr,
             min_zone_width=min_zone_width,
             t1_enabled=params["t1_enabled"],
+            max_hold_minutes=params.get("max_hold_minutes"),
+            min_progress_pct=params.get("min_progress_pct", 0.0),
             hard_floor_enabled=params["hard_floor_enabled"],
             breakeven_trail=params["breakeven_trail"],
             hard_floor_pct=hard_floor_pct,

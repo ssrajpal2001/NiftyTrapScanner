@@ -1,29 +1,58 @@
-I am continuing work on TrapScanner — a Nifty + Sensex bearish trap scanner.
+I am continuing work on TrapScanner — a Nifty + Sensex bearish trap scanner
+for NSE weekly options using institutional seller trap detection.
 
-Repo: https://github.com/ssrajpal2001/NiftyTrapScanner
+Repo:   https://github.com/ssrajpal2001/NiftyTrapScanner
 Branch: phase2/ltf-entry-engine
-Local: D:\AlgoSoft\TrapScanner
-Run: streamlit run live_tracker.py (port 8501) | streamlit run phase2_ui.py (port 8502)
+Local:  D:\AlgoSoft\TrapScanner
+Run:
+  streamlit run phase2_ui.py      (port 8502) — backtest + scenario comparison
+  streamlit run live_tracker.py   (port 8501) — live market tracker
 
-Please read memory files:
-- trapscanner_project.md
-- trapscanner_phase3_strategy.md  
-- trapscanner_pending.md
+Please read all memory files before starting:
+  - trapscanner_project.md
+  - trapscanner_phase3_strategy.md
+  - trapscanner_pending.md
+  - trapscanner_strategy_full.md
 
-Today I want to:
+KEY DECISIONS ALREADY MADE (do not re-debate):
+- Phase 2 (fixed buffer SL) is PERMANENTLY DISABLED. Phase 3 cross-pair SL only.
+- Nifty lot size = 65. Minimum qty = 2 lots (for T1 partial exit at 50%).
+- SL Direction Filter defaults to ON (True). Only counterpart entries with RISING
+  price trigger the SL. Declining counterpart entries = market still in our favour.
+- 6 exit scenarios built in scanner.py (PHASE3_SCENARIOS dict). All run in parallel
+  in backtest so we can compare which works best before going live.
+
+STRATEGY SUMMARY (seller's perspective):
+- We NEVER trade spot/futures. Only option PREMIUM charts.
+- HTF (75-min): bearish trap = curr LOW < prev LOW → bears short → HIGH > prev HIGH
+  → bears TRAPPED. Zone = Ref Bar LOW (top) to Next Bar LOW (bottom).
+- LTF (5-min): same pattern INSIDE the HTF zone. Select lowest Zone Low per HTF zone.
+- ENTRY: price returns to LTF Ref Bar LOW (5-min sellers' SL hit) → BUY premium.
+- TARGET (T1): HTF Ref Bar HIGH (75-min sellers' SL level).
+- PHASE 3 SL: counterpart option fires its OWN LTF entry (inside ITS own HTF zone)
+  → exit at active side's current bar CLOSE.
+  SL only valid if counterpart entry price > previous counterpart entry price
+  (counterpart gaining upward momentum = market genuinely reversing).
+
+TODAY I WANT TO:
 [TELL CLAUDE WHAT YOU WANT — examples below]
 
-Option A — After market session:
-"I ran live_tracker.py during today's session. Here is the log file contents: [PASTE LOG]. 
+Option A — After live market session:
+"I ran live_tracker.py during today's session. Here is the log:
+[PASTE LOG]
 Help me analyse what happened and fix any issues."
 
-Option B — Test phase2_ui Phase 3 section:
-"Test and fix the Phase 3 paired analysis section in phase2_ui.py — 
-it was just built, not tested in browser yet."
+Option B — Run scenario comparison backtest:
+"Run Daily Rotating Backtest from [DATE] to [DATE] with all 6 scenarios selected.
+Share results and tell me which scenario performs best."
 
-Option C — Date-range backtest Phase 3:
-"Update run_daterange_backtest in phase2_ui.py to use backtest_phase3 
-with paired contracts (S1 CE ↔ R1 PE, S2 CE ↔ R2 PE)."
+Option C — EC2 deployment:
+"My EC2 has ports [X] and [Y] open. Deploy TrapScanner and start live_tracker.py."
 
-Option D — EC2 deployment:
-"My EC2 has ports [X] and [Y] open. Set up and deploy TrapScanner."
+Option D — Live tracker scenario shadow tracking:
+"Add shadow scenario tracking to live_tracker.py — when a trade closes,
+show what each scenario (A-E) would have done with that trade's bar data."
+
+Option E — Analyse live session log:
+"Here is today's live_tracker log: [PASTE]. 
+Which scenario would have been best for today's trades?"

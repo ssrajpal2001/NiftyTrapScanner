@@ -40,9 +40,10 @@ from config import (
 )
 from data import (
     fetch_spot_prev_day, fetch_spot_for_date, get_instrument_key, fetch_1min,
-    resample_tf, pivot_levels, get_option_expiries,
+    resample_tf, pivot_levels, get_option_expiries, fetch_spot_bars,
 )
-from scanner import (scan_htf, scan_ltf, backtest, backtest_phase3,
+from scanner import (scan_htf, scan_ltf, scan_htf_spot, scan_ltf_bull,
+                     select_best_ltf_entry, backtest, backtest_phase3,
                      run_scenario_comparison, PHASE3_SCENARIOS, trade_summary)
 
 st.set_page_config(
@@ -83,28 +84,58 @@ h1, h2, h3 { color: #1565C0; }
 
 
 # -- helpers -------------------------------------------------------------------
-_FALLBACK_TOKEN = (
-    "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ"
-    ".eyJzdWIiOiI0SkNIRDciLCJqdGkiOiI2YTJlNWEyOTFiZTRjMDQyZTg1YTg3MTMiLC"
-    "Jpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaWF0IjoxNzgxND"
-    "IyNjMzLCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE3ODE0NzQ0MD"
-    "B9.QEijmZUpQ8RRUjpJf3dKyRaXZQ_UJfW_gnXVK0p6TS8"
-)
+_ENV_PATH = Path(__file__).parent / ".env"
+
+
+def _decode_jwt_exp(token: str) -> int | None:
+    import base64, json as _json
+    try:
+        payload_b64 = token.split(".")[1]
+        padding = (4 - len(payload_b64) % 4) % 4
+        payload = _json.loads(base64.urlsafe_b64decode(payload_b64 + "=" * padding))
+        return int(payload["exp"])
+    except Exception:
+        return None
+
+
+def _token_valid(token: str) -> bool:
+    if not token:
+        return False
+    exp = _decode_jwt_exp(token)
+    return True if exp is None else datetime.now().timestamp() < exp
+
+
+def _token_expiry_str(token: str) -> str:
+    exp = _decode_jwt_exp(token)
+    return "unknown" if exp is None else datetime.fromtimestamp(exp).strftime("%d %b %H:%M")
+
+
+def _save_token_to_env(token: str):
+    try:
+        lines = _ENV_PATH.read_text(encoding="utf-8").splitlines() if _ENV_PATH.exists() else []
+        new_lines = [l for l in lines if not l.startswith("UPSTOX_TOKEN=")]
+        new_lines.append(f"UPSTOX_TOKEN={token}")
+        _ENV_PATH.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        os.environ["UPSTOX_TOKEN"] = token
+    except Exception:
+        pass
 
 
 def _get_token() -> str:
     if st.session_state.get("live_token"):
         return st.session_state["live_token"]
+    env_t = os.environ.get("UPSTOX_TOKEN", "")
+    if env_t and _token_valid(env_t):
+        st.session_state["live_token"] = env_t
+        return env_t
     try:
         t = st.secrets.get("UPSTOX_TOKEN", "") or ""
-        if t:
+        if t and _token_valid(t):
+            st.session_state["live_token"] = t
             return t
     except Exception:
         pass
-    env_t = os.environ.get("UPSTOX_TOKEN", "")
-    if env_t:
-        return env_t
-    return _FALLBACK_TOKEN
+    return ""
 
 
 def round_n(v: float, step: int) -> int:
@@ -181,8 +212,15 @@ def _scan_result(strike, opt_type, expiry_api, from_date, to_date,
     if df_ltf.empty or not htf_trapped:
         return [], df_ltf
 
+    _max_age = st.session_state.get("_max_zone_age")
+    _scan_date = datetime.strptime(to_date, "%Y-%m-%d").date()
+
     selected = []
     for htf_e in htf_trapped:
+        if _max_age is not None:
+            ref_date = pd.Timestamp(htf_e["ref_ts"]).date()
+            if (_scan_date - ref_date).days > _max_age:
+                continue
         zh, zl, tgt  = htf_e["zone_high"], htf_e["zone_low"], htf_e["sl"]
         trap_ts       = pd.Timestamp(htf_e["trapped_on"])
         htf_ref_lbl   = pd.Timestamp(htf_e["ref_ts"]).strftime("%d %b %y %H:%M")
@@ -194,9 +232,9 @@ def _scan_result(strike, opt_type, expiry_api, from_date, to_date,
                                    htf_ref_bar=htf_ref_lbl,
                                    htf_trap_bar=htf_trap_lbl,
                                    htf_target=tgt)
-        closed = [x for x in ltf_entries if x["status"] == "CLOSED"]
-        if closed:
-            selected.append(min(closed, key=lambda x: x["zone_low"]))
+        best = select_best_ltf_entry(ltf_entries)
+        if best:
+            selected.append(best)
 
     return selected, df_ltf
 
@@ -204,7 +242,7 @@ def _scan_result(strike, opt_type, expiry_api, from_date, to_date,
 # ==============================================================================
 #  BACKTEST TABLE RENDER
 # ==============================================================================
-def render_backtest_table(df_trades: pd.DataFrame, summary: dict, key: str = ""):
+def render_backtest_table(df_trades: pd.DataFrame, summary: dict, key: str = "", key_suffix: str = ""):
     if df_trades.empty:
         st.info("No LTF trades in this window.")
         return
@@ -228,15 +266,19 @@ def render_backtest_table(df_trades: pd.DataFrame, summary: dict, key: str = "")
 
     def exit_clr(v):
         return {
-            "TARGET":    f"color:{CLR_GREEN};font-weight:bold;",
-            "SL":        f"color:{CLR_RED};font-weight:bold;",
-            "SQUAREOFF": f"color:{CLR_MUTED};",
+            "TARGET":        f"color:{CLR_GREEN};font-weight:bold;",
+            "SL":            f"color:{CLR_RED};font-weight:bold;",
+            "HARD_FLOOR_SL": f"color:{CLR_RED};font-weight:bold;",
+            "BREAKEVEN_SL":  f"color:{CLR_ORANGE};font-weight:bold;",
+            "TIME_EXIT":     f"color:#9C27B0;font-weight:bold;",
+            "PROGRESS_EXIT": f"color:#FF9800;font-weight:bold;",
+            "SQUAREOFF":     f"color:{CLR_MUTED};",
         }.get(v, "")
 
     htf_cols = ["HTF Ref Bar", "HTF Trap Bar", "HTF Zone High", "HTF Zone Low", "HTF Target"]
     ltf_cols = ["LTF Date", "LTF Entry Time", "LTF Exit Time",
                 "LTF Entry", "LTF Zone Low", "LTF Target", "LTF SL", "LTF Exit Price",
-                "Exit", "P&L (Rs)", "Cumulative P&L"]
+                "T1 Booked", "Exit", "P&L (Rs)", "Cumulative P&L"]
     show_cols = [c for c in htf_cols + ltf_cols if c in df_trades.columns]
 
     st.dataframe(
@@ -267,7 +309,7 @@ def render_backtest_table(df_trades: pd.DataFrame, summary: dict, key: str = "")
         paper_bgcolor="#FFFFFF", plot_bgcolor="#FAFBFC",
         height=280, margin=dict(l=40, r=20, t=40, b=40),
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, width="stretch", key=f"bt_cum_{key_suffix or key}")
 
     # -- Log download ----------------------------------------------------------
     lines = []
@@ -485,7 +527,7 @@ def render_full_report(all_trades: pd.DataFrame, title: str = "Backtest Report",
         height=300, margin=dict(l=40, r=20, t=40, b=40),
         legend=dict(orientation="h"),
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, width="stretch", key=f"fr_cum_{key_suffix}")
 
     fig2 = go.Figure()
     fig2.add_trace(go.Scatter(
@@ -499,7 +541,7 @@ def render_full_report(all_trades: pd.DataFrame, title: str = "Backtest Report",
         paper_bgcolor="#FFFFFF", plot_bgcolor="#FAFBFC",
         height=220, margin=dict(l=40, r=20, t=40, b=40),
     )
-    st.plotly_chart(fig2, width="stretch")
+    st.plotly_chart(fig2, width="stretch", key=f"fr_dd_{key_suffix}")
 
     # -- Date-wise grouped P&L -------------------------------------------------
     st.markdown("#### Date-wise P&L Summary")
@@ -527,7 +569,7 @@ def render_full_report(all_trades: pd.DataFrame, title: str = "Backtest Report",
     show_cols = [c for c in [
         "Contract", "LTF Date", "LTF Entry Time", "LTF Exit Time",
         "LTF Entry", "LTF Zone Low", "LTF Target", "LTF SL", "LTF Exit Price",
-        "Exit", pnl_col, "Cumulative P&L",
+        "T1 Booked", "Exit", pnl_col, "Cumulative P&L",
         "HTF Ref Bar", "HTF Trap Bar", "HTF Zone High", "HTF Zone Low", "HTF Target",
     ] if c in df.columns]
 
@@ -536,9 +578,13 @@ def render_full_report(all_trades: pd.DataFrame, title: str = "Backtest Report",
             return f"color:{CLR_GREEN};font-weight:bold;" if v > 0 else f"color:{CLR_RED};font-weight:bold;"
         return ""
     def exit_c(v):
-        return {"TARGET": f"color:{CLR_GREEN};font-weight:bold;",
-                "SL": f"color:{CLR_RED};font-weight:bold;",
-                "SQUAREOFF": f"color:{CLR_MUTED};"}.get(v, "")
+        return {"TARGET":         f"color:{CLR_GREEN};font-weight:bold;",
+                "SL":             f"color:{CLR_RED};font-weight:bold;",
+                "HARD_FLOOR_SL":  f"color:{CLR_RED};font-weight:bold;",
+                "BREAKEVEN_SL":   f"color:{CLR_ORANGE};font-weight:bold;",
+                "TIME_EXIT":      f"color:#9C27B0;font-weight:bold;",
+                "PROGRESS_EXIT":  f"color:#FF9800;font-weight:bold;",
+                "SQUAREOFF":      f"color:{CLR_MUTED};"}.get(v, "")
 
     st.dataframe(
         df[show_cols].style.map(pnl_c, subset=[pnl_col]).map(exit_c, subset=["Exit"]),
@@ -672,7 +718,7 @@ def render_scenario_comparison(scenario_results: dict, key_suffix: str = ""):
         height=320, margin=dict(l=40, r=20, t=40, b=40),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch", key=f"sc_equity_{key_suffix}")
 
     # Detailed report per scenario
     st.markdown("### Detailed Reports per Scenario")
@@ -726,8 +772,15 @@ def _scan_contract_for_dates(strike, opt_type, expiry, expiry_api,
     if df_ltf.empty:
         return pd.DataFrame()
 
+    _max_age   = st.session_state.get("_max_zone_age")
+    _scan_date = datetime.strptime(trade_to, "%Y-%m-%d").date()
+
     selected = []
     for htf_e in htf_trapped:
+        if _max_age is not None:
+            ref_date = pd.Timestamp(htf_e["ref_ts"]).date()
+            if (_scan_date - ref_date).days > _max_age:
+                continue
         zh, zl, tgt = htf_e["zone_high"], htf_e["zone_low"], htf_e["sl"]
         trap_ts = pd.Timestamp(htf_e["trapped_on"])
         df_ltf_after = df_ltf[df_ltf["datetime"] >= trap_ts].copy().reset_index(drop=True)
@@ -739,10 +792,10 @@ def _scan_contract_for_dates(strike, opt_type, expiry, expiry_api,
                                    htf_ref_bar=htf_ref_label,
                                    htf_trap_bar=htf_trap_label,
                                    htf_target=tgt)
-        closed = [e for e in ltf_entries if e["status"] == "CLOSED"]
-        if not closed:
+        best = select_best_ltf_entry(ltf_entries)
+        if not best:
             continue
-        selected.append(min(closed, key=lambda e: e["zone_low"]))
+        selected.append(best)
 
     if not selected:
         return ([], df_ltf) if return_entries_only else pd.DataFrame()
@@ -767,6 +820,81 @@ def _scan_contract_for_dates(strike, opt_type, expiry, expiry_api,
                          max_entry_time=_met, min_rr=_mrr, min_zone_width=_mzw)
 
     return df_trades
+
+
+def _build_spot_signals(from_date: str, to_date: str,
+                        htf_min: int, ltf_min: int,
+                        token: str, index: str = "Nifty") -> list:
+    """
+    Fetch Nifty spot bars, run HTF+LTF scan for BOTH bearish and bullish traps,
+    return list of {ts: Timestamp, direction: "BULLISH"/"BEARISH"} dicts.
+
+    BULLISH signal = bearish trap in spot (bears trapped → spot UP → CE)
+    BEARISH signal = bullish trap in spot (bulls trapped → spot DOWN → PE)
+    """
+    h = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    # 3-week look-back so HTF has context
+    fetch_from = (datetime.strptime(from_date, "%Y-%m-%d") - timedelta(weeks=3)).strftime("%Y-%m-%d")
+
+    df_htf_spot = fetch_spot_bars(fetch_from, to_date, h, index=index, minutes=htf_min)
+    df_ltf_spot = fetch_spot_bars(fetch_from, to_date, h, index=index, minutes=ltf_min)
+
+    if df_htf_spot.empty or df_ltf_spot.empty:
+        return []
+
+    _, htf_spot_entries = scan_htf_spot(df_htf_spot)
+    htf_active = [e for e in htf_spot_entries if e["status"] in ("TRAPPED", "CLOSED")]
+
+    signals = []
+    for e in htf_active:
+        trap_ts = pd.Timestamp(e["trapped_on"])
+        df_ltf_after = df_ltf_spot[df_ltf_spot["datetime"] >= trap_ts].copy().reset_index(drop=True)
+        if len(df_ltf_after) < 2:
+            continue
+
+        htf_ref  = pd.Timestamp(e["ref_ts"]).strftime("%d %b %y %H:%M") if e.get("ref_ts") else ""
+        htf_trap = trap_ts.strftime("%d %b %y %H:%M")
+
+        if e["kind"] == "BEAR":
+            # Bearish HTF spot → scan for 5-min bearish LTF trap → BULLISH signal (CE)
+            _, ltf_entries = scan_ltf(
+                df_ltf_after, e["zone_high"], e["zone_low"],
+                htf_ref_bar=htf_ref, htf_trap_bar=htf_trap,
+                htf_target=e["sl"],
+            )
+            direction = "BULLISH"
+        else:
+            # Bullish HTF spot → scan for 5-min bullish LTF trap → BEARISH signal (PE)
+            _, ltf_entries = scan_ltf_bull(
+                df_ltf_after, e["zone_high"], e["zone_low"],
+                htf_ref_bar=htf_ref, htf_trap_bar=htf_trap,
+                htf_target=e["sl"],
+            )
+            direction = "BEARISH"
+
+        for ltf_e in ltf_entries:
+            if ltf_e.get("closed_on") and ltf_e["status"] in ("CLOSED", "TRAPPED"):
+                signals.append({
+                    "ts"       : pd.Timestamp(ltf_e["closed_on"]),
+                    "direction": direction,
+                })
+
+    return signals
+
+
+def _has_spot_signal(entry_ts: pd.Timestamp, direction: str,
+                     signals: list, window_min: int = 20) -> bool:
+    """
+    True if a matching spot signal fired within `window_min` minutes before
+    the option entry (or up to 5 min after — handles 5-min bar alignment).
+    """
+    for sig in signals:
+        if sig["direction"] != direction:
+            continue
+        delta = (entry_ts - sig["ts"]).total_seconds() / 60
+        if -5 <= delta <= window_min:
+            return True
+    return False
 
 
 def run_daterange_backtest(from_date, to_date, htf_min, ltf_min,
@@ -800,6 +928,17 @@ def run_daterange_backtest(from_date, to_date, htf_min, ltf_min,
     _selected_scen = st.session_state.get("_selected_scenarios") or ["Baseline (CP-SL only)"]
     _hfp          = st.session_state.get("_hard_floor_pct", 3.0)
     all_p3_by_sc: dict = {sc: [] for sc in _selected_scen}
+
+    # Spot filter: build full-range signal list once before iterating weeks
+    _spot_on  = st.session_state.get("_spot_filter_on", False)
+    _spot_win = int(st.session_state.get("_spot_filter_win", 20))
+    spot_signals: list = []
+    if _spot_on:
+        with st.spinner("Fetching Nifty spot bars for signal filter..."):
+            spot_signals = _build_spot_signals(
+                from_date, to_date, htf_min, ltf_min, token, index
+            )
+        st.caption(f"Spot filter active — {len(spot_signals)} signals found ({_spot_win}-min window)")
 
     progress      = st.progress(0, text="Running Phase 3 scenarios...")
     total_w       = len(weeks)
@@ -848,6 +987,21 @@ def run_daterange_backtest(from_date, to_date, htf_min, ltf_min,
                 trade_from, trade_to, htf_min, ltf_min, sl_buffer, token,
                 return_entries_only=True,
             )
+
+            # Apply spot filter: drop option entries with no matching spot signal
+            if _spot_on and spot_signals:
+                ce_entries = [
+                    e for e in ce_entries
+                    if _has_spot_signal(
+                        pd.Timestamp(e["closed_on"]), "BULLISH", spot_signals, _spot_win
+                    )
+                ] if ce_entries else []
+                pe_entries = [
+                    e for e in pe_entries
+                    if _has_spot_signal(
+                        pd.Timestamp(e["closed_on"]), "BEARISH", spot_signals, _spot_win
+                    )
+                ] if pe_entries else []
 
             for sc_name in _selected_scen:
                 sc_params = PHASE3_SCENARIOS.get(sc_name, {})
@@ -993,7 +1147,14 @@ def scan_one_contract(label, strike, opt_type, cls,
     selected_ltf_entries = []   # ONE lowest-zone-low entry per HTF trap
     all_ltf_rows         = []   # all LTF traps found (informational)
 
+    _max_age   = st.session_state.get("_max_zone_age")
+    _scan_date = datetime.strptime(to_date, "%Y-%m-%d").date()
+
     for htf_e in htf_trapped:
+        if _max_age is not None:
+            ref_date = pd.Timestamp(htf_e["ref_ts"]).date()
+            if (_scan_date - ref_date).days > _max_age:
+                continue
         zh      = htf_e["zone_high"]
         zl      = htf_e["zone_low"]
         tgt     = htf_e["sl"]
@@ -1031,13 +1192,10 @@ def scan_one_contract(label, strike, opt_type, cls,
                 "LTF Status"    : row["Status"],
             })
 
-        # Select lowest Zone Low among CLOSED entries (price returned to bear entry)
-        closed_ltf = [e for e in ltf_entries if e["status"] == "CLOSED"]
-        if not closed_ltf:
+        best = select_best_ltf_entry(ltf_entries)
+        if not best:
             continue
-
-        lowest = min(closed_ltf, key=lambda e: e["zone_low"])
-        selected_ltf_entries.append(lowest)
+        selected_ltf_entries.append(best)
 
     if all_ltf_rows:
         def sc3(v):
@@ -1117,7 +1275,7 @@ def main():
         selected_scenarios = []
         for sname in all_scenario_names:
             desc = PHASE3_SCENARIOS[sname]["description"]
-            checked = st.checkbox(sname, value=(sname in ["Baseline (CP-SL only)", "Scenario B: T1 + Breakeven SL"]),
+            checked = st.checkbox(sname, value=(sname in ["Scenario C: T1 + Hard Floor SL"]),
                                   key=f"sc_{sname[:20]}", help=desc)
             if checked:
                 selected_scenarios.append(sname)
@@ -1154,6 +1312,52 @@ def main():
                                           key="fil_zw_val", disabled=not min_zw_on)
             min_zone_width = min_zw_val if min_zw_on else 0.0
             st.session_state["_min_zone_width"] = min_zone_width
+
+            st.markdown("**Shadow Scenarios (F / G / H)**")
+            hold_on  = st.checkbox("Time Exit — max hold (min)", value=False, key="fil_hold_on")
+            hold_val = st.number_input("Max hold minutes", value=60, step=5,
+                                        min_value=15, max_value=240,
+                                        key="fil_hold_val", disabled=not hold_on)
+            # Override max_hold_minutes in Scenario F/H from sidebar
+            if hold_on:
+                PHASE3_SCENARIOS["Scenario F: T1 + Hard Floor + Time Exit"]["max_hold_minutes"] = hold_val
+                PHASE3_SCENARIOS["Scenario H: T1 + Hard Floor + Time + Progress"]["max_hold_minutes"] = hold_val
+
+            prog_on  = st.checkbox("Progress Exit — min % at T+30", value=False, key="fil_prog_on")
+            prog_val = st.number_input("Min progress % (0–100)", value=30, step=5,
+                                        min_value=5, max_value=80,
+                                        key="fil_prog_val", disabled=not prog_on)
+            if prog_on:
+                PHASE3_SCENARIOS["Scenario G: T1 + Hard Floor + Progress Check"]["min_progress_pct"] = prog_val / 100
+                PHASE3_SCENARIOS["Scenario H: T1 + Hard Floor + Time + Progress"]["min_progress_pct"] = prog_val / 100
+
+            max_zone_age_on  = st.checkbox("Max HTF Zone Age", value=False, key="fil_age_on",
+                                            help="Skip HTF zones whose Ref Bar is older than N calendar days")
+            max_zone_age_val = st.number_input("Max age (calendar days)", value=10, step=1,
+                                               min_value=1, max_value=90,
+                                               key="fil_age_val", disabled=not max_zone_age_on)
+            max_zone_age = max_zone_age_val if max_zone_age_on else None
+            st.session_state["_max_zone_age"] = max_zone_age
+
+            st.markdown("**Nifty Spot Filter (Option B)**")
+            spot_filter_on = st.checkbox(
+                "Use Nifty Spot Filter",
+                value=False,
+                key="fil_spot_on",
+                help=(
+                    "Fetches Nifty 75-min + 5-min SPOT bars. "
+                    "CE entries are only taken when Nifty spot also shows a bearish LTF trap (BULLISH bias). "
+                    "PE entries only when spot shows a bullish LTF trap (BEARISH bias). "
+                    "Both must align within a 20-min window."
+                ),
+            )
+            spot_window_val = st.number_input(
+                "Signal window (min) — how far before option entry spot must have fired",
+                value=20, step=5, min_value=5, max_value=60,
+                key="fil_spot_win", disabled=not spot_filter_on,
+            )
+            st.session_state["_spot_filter_on"]  = spot_filter_on
+            st.session_state["_spot_filter_win"]  = spot_window_val if spot_filter_on else 20
 
         st.markdown("---")
         if st.button("Refresh / Clear Cache", use_container_width=True, type="primary"):
@@ -1557,8 +1761,14 @@ def run_daily_rotating_backtest(from_date, to_date, htf_min, ltf_min,
             df_ltf     = resample_tf(df1, ltf_min)
             df_ltf_day = df_ltf[df_ltf["datetime"].dt.date == trade_date].copy()
 
+            _max_age = st.session_state.get("_max_zone_age")
+
             selected = []
             for htf_e in htf_active:
+                if _max_age is not None:
+                    ref_date = pd.Timestamp(htf_e["ref_ts"]).date()
+                    if (trade_date - ref_date).days > _max_age:
+                        continue
                 zh  = htf_e["zone_high"]
                 zl  = htf_e["zone_low"]
                 tgt = htf_e["sl"]
@@ -1568,10 +1778,10 @@ def run_daily_rotating_backtest(from_date, to_date, htf_min, ltf_min,
                     df_ltf_day, zh, zl,
                     htf_ref_bar=htf_ref, htf_trap_bar=htf_trap, htf_target=tgt
                 )
-                closed_ltf = [e for e in ltf_entries if e["status"] == "CLOSED"]
-                if not closed_ltf:
+                best = select_best_ltf_entry(ltf_entries)
+                if not best:
                     continue
-                selected.append(min(closed_ltf, key=lambda e: e["zone_low"]))
+                selected.append(best)
 
             if not selected:
                 continue

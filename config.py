@@ -17,7 +17,12 @@ LTF_MINUTES = 5
 # ── Session window ─────────────────────────────────────────────────────────────
 SESSION_START = "09:15"
 SESSION_END   = "15:29"
-SQUAREOFF_TIME = "15:30"   # intraday hard close
+SQUAREOFF_TIME = "15:30"   # equity intraday hard close
+
+# ── MCX (commodity) session ────────────────────────────────────────────────────
+MCX_SESSION_START  = "09:00"
+MCX_SESSION_END    = "23:29"
+MCX_SQUAREOFF_TIME = "23:30"
 
 # ── Upstox API base ────────────────────────────────────────────────────────────
 UPSTOX_BASE = "https://api.upstox.com/v2"
