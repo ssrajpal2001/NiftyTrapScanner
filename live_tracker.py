@@ -913,6 +913,20 @@ def live_ltf_scan(open_traps: list, df1: pd.DataFrame, ltf_min: int,
                 elif opt_type == "PE":
                     live_strike = strike + strike_step
 
+            # Derive 1-ITM Upstox key and subscribe WS so P&L tracks the actual order strike
+            _live_key = upstox_key   # default: same as scan strike
+            _live_sym = sym          # default: same symbol
+            if _use_1itm and live_strike != strike and expiry:
+                _cfg         = INDEX_CONFIG.get(index_name, {})
+                _upstox_exch = upstox_key.split("|")[0] if "|" in upstox_key else ""
+                _key_pfx     = _cfg.get("key_prefix", "SENSEX")
+                _sym_pfx     = _cfg.get("symbol_prefix", "SENSEX")
+                if _upstox_exch:
+                    _live_key = fallback_key(live_strike, opt_type, expiry, _upstox_exch, _key_pfx)
+                    _live_sym = trading_symbol(live_strike, opt_type, expiry, _sym_pfx)
+                    if not ws_feed.get_ltp(_live_key):
+                        ws_feed.add_keys([_live_key], {})
+
             uid    = f"{sym}_{lowest['closed_on']}"
             setup  = {
                 "uid"         : uid,
@@ -927,38 +941,40 @@ def live_ltf_scan(open_traps: list, df1: pd.DataFrame, ltf_min: int,
                 "htf_zone_high": round(zh, 2),
                 "htf_zone_low" : round(zl, 2),
                 "live_strike"  : live_strike,
+                "live_key"     : _live_key,
+                "live_sym"     : _live_sym,
             }
             entry_hits.append(setup)
             if uid not in notified:
                 _itm_tag = f" [1-ITM {live_strike}]" if _use_1itm and live_strike != strike else ""
                 log_event(log_path, "TRADE_ENTRY",
-                          f"{sym} BUY@{lowest['entry']:.2f} SL{setup['sl']:.2f} T{tgt:.2f}{_itm_tag}")
+                          f"{_live_sym} BUY@{lowest['entry']:.2f} SL{setup['sl']:.2f} T{tgt:.2f}{_itm_tag}")
                 notified.add(uid)
-                browser_notify(f"ENTRY: {sym}",
+                browser_notify(f"ENTRY: {_live_sym}",
                                f"BUY @ {lowest['entry']:.2f} | SL {setup['sl']:.2f}{_itm_tag}")
                 # ── Trade log (paper or live) ─────────────────────────────────
                 if opt_type and spot_ltp and expiry:
                     _live_set = st.session_state.get("live_scripts", set())
                     _is_live  = index_name in _live_set
-                    # Bid-ask spread gate (only for live orders)
+                    # Bid-ask spread gate — check actual order strike
                     _spread_ok   = True
                     _spread_info = ""
-                    if _is_live and upstox_key and upstox_token:
+                    if _is_live and _live_key and upstox_token:
                         _spread_ok, _spct, _bid, _ask = check_bid_ask_spread(
-                            upstox_key, upstox_token
+                            _live_key, upstox_token
                         )
                         if not _spread_ok:
                             _spread_info = (f"Bid:{_bid} Ask:{_ask} "
                                             f"Spread:{_spct:.1f}% > {MAX_SPREAD_PCT}%")
                             log_event(log_path, "SKIPPED_WIDE_SPREAD",
-                                      f"{sym} {_spread_info}")
+                                      f"{_live_sym} {_spread_info}")
                             angel_orders._log(
-                                f"SPREAD REJECTED [{sym}] — {_spread_info} — order NOT placed"
+                                f"SPREAD REJECTED [{_live_sym}] -- {_spread_info} -- order NOT placed"
                             )
                             _rej = st.session_state.get("_spread_rejected", [])
-                            _rej_entry = {"sym": sym, "info": _spread_info,
+                            _rej_entry = {"sym": _live_sym, "info": _spread_info,
                                           "time": datetime.now().strftime("%H:%M:%S")}
-                            if not any(r["sym"] == sym for r in _rej):
+                            if not any(r["sym"] == _live_sym for r in _rej):
                                 _rej.append(_rej_entry)
                             st.session_state["_spread_rejected"] = _rej
                     if _spread_ok:
@@ -969,8 +985,8 @@ def live_ltf_scan(open_traps: list, df1: pd.DataFrame, ltf_min: int,
                             qty            = qty * lot_size,
                             sl_price       = setup["sl"],
                             target_price   = setup["target"],
-                            tracked_sym    = sym,
-                            signal_src     = f"5-min retest zone {setup['ltf_zone_low']:.0f}→{setup['ltf_zone_high']:.0f}",
+                            tracked_sym    = _live_sym,
+                            signal_src     = f"5-min retest zone {setup['ltf_zone_low']:.0f}->{setup['ltf_zone_high']:.0f}",
                             lots           = qty,
                             lot_size       = lot_size,
                             strike         = live_strike,
@@ -978,6 +994,7 @@ def live_ltf_scan(open_traps: list, df1: pd.DataFrame, ltf_min: int,
                             index_name     = index_name,
                             product_type   = st.session_state.get("angel_product_type", "CARRYFORWARD"),
                             paper_override = not _is_live,
+                            live_key       = _live_key,
                         )
 
         elif trapped_ltf:
@@ -1729,6 +1746,13 @@ def _live_panel():
             ltp = ws_feed.get_ltp(meta["key"])
             if ltp:
                 _tracked_prices[sym] = ltp
+        # For 1-ITM trades: override with the actual order strike's LTP
+        for _t in angel_orders.get_open_trades():
+            _lk = _t.get("live_key", "")
+            if _lk:
+                _itm_ltp = ws_feed.get_ltp(_lk)
+                if _itm_ltp:
+                    _tracked_prices[_t["tracked_sym"]] = _itm_ltp
         angel_orders.check_exits(_tracked_prices)
 
         # Update trailing SL using live 5-min bars of each open trade's tracked sym

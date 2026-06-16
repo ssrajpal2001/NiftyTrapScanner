@@ -1,5 +1,5 @@
-﻿""
-angel_orders.py — Angel One SmartAPI integration.
+﻿"""
+angel_orders.py - Angel One SmartAPI integration.
 
 PAPER_MODE = True  ->  logs orders, zero real API calls, P&L tracked from WS prices.
 PAPER_MODE = False ->  live trading (flip only after paper testing sign-off).
@@ -182,6 +182,7 @@ def log_entry(
     index_name: str = "Sensex",       # used to pick symbol builder
     product_type: str = "CARRYFORWARD",  # CARRYFORWARD=NRML, INTRADAY=MIS
     paper_override: bool | None = None,  # None=use global PAPER_MODE; True/False=force per-script
+    live_key: str = "",                  # Upstox instrument key of the actual order strike (1-ITM)
 ) -> Optional[dict]:
     """
     Record a trade entry. In live mode places a MARKET BUY on Angel One.
@@ -226,6 +227,7 @@ def log_entry(
         "trail_sl"     : sl_price,
         "trail_zones"  : [],
         "qty_remaining": qty,
+        "live_key"     : live_key,     # Upstox key of actual order strike (1-ITM or same as scan strike)
     }
 
     with _lock:
