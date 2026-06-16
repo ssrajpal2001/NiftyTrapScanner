@@ -1,12 +1,12 @@
-"""
+﻿""
 angel_orders.py — Angel One SmartAPI integration.
 
-PAPER_MODE = True  →  logs orders, zero real API calls, P&L tracked from WS prices.
-PAPER_MODE = False →  live trading (flip only after paper testing sign-off).
+PAPER_MODE = True  ->  logs orders, zero real API calls, P&L tracked from WS prices.
+PAPER_MODE = False ->  live trading (flip only after paper testing sign-off).
 
 Paper trade lifecycle:
-  signal fires → log_entry() → track via WS prices → SL/T1 from original zone
-  → log_exit() → append to paper_trades log
+  signal fires -> log_entry() -> track via WS prices -> SL/T1 from original zone
+  -> log_exit() -> append to paper_trades log
 """
 
 from __future__ import annotations
@@ -71,16 +71,19 @@ def _load_state() -> None:
         _log(f"STATE LOAD ERROR: {e}")
 
 
-_load_state()
-
-
 # ── Logging helper ──────────────────────────────────────────────────────────────
 def _log(msg: str) -> None:
     ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] {msg}"
-    print(line)
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        print(line.encode("ascii", "replace").decode())
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(line + "\n")
+
+
+_load_state()
 
 
 # ── Symbol builders ─────────────────────────────────────────────────────────────
@@ -121,7 +124,7 @@ def _lookup_token(exchange: str, symbol: str) -> str:
             token = result["data"][0].get("symboltoken", "")
             if token:
                 _token_cache[key] = token
-                _log(f"TOKEN OK: {symbol} → {token}")
+                _log(f"TOKEN OK: {symbol} -> {token}")
                 return token
         _log(f"TOKEN NOT FOUND: {exchange} {symbol}  resp={result}")
     except Exception as e:
@@ -143,8 +146,8 @@ def login(api_key: str = "", client_id: str = "", password: str = "",
     _ts  = totp_secret or ANGEL_TOTP_SEC
     if not all([_ak, _cid, _pw, _ts]):
         _log(f"Angel login SKIPPED — missing credentials (check .env): "
-             f"api_key={'✓' if _ak else '✗'} client={'✓' if _cid else '✗'} "
-             f"password={'✓' if _pw else '✗'} totp={'✓' if _ts else '✗'}")
+             f"api_key={'OK' if _ak else 'NO'} client={'OK' if _cid else 'NO'} "
+             f"password={'OK' if _pw else 'NO'} totp={'OK' if _ts else 'NO'}")
         return False
     try:
         from SmartApi import SmartConnect
@@ -184,6 +187,7 @@ def log_entry(
     Record a trade entry. In live mode places a MARKET BUY on Angel One.
     """
     # Build Angel One symbol
+    _is_paper = PAPER_MODE if paper_override is None else paper_override
     _step = 100 if index_name == "CrudeOil" else 100
     if strike is None:
         strike = get_1itm_strike(spot_ltp, side, _step)
@@ -232,7 +236,6 @@ def log_entry(
         _open_trades.append(trade)
         _save_state()
 
-    _is_paper = PAPER_MODE if paper_override is None else paper_override
     mode_tag  = "PAPER" if _is_paper else "LIVE"
     _log(f"{mode_tag} ENTRY [{side}]  {symbol}  Strike:{strike}  "
          f"Qty:{qty}  SL:{sl_price:.1f}  T1:{target_price:.1f}  "
@@ -302,7 +305,7 @@ def check_exits(tracked_prices: dict[str, float]) -> list[dict]:
                 _log(f"T1 PARTIAL [{t['id']}]  50% booked  "
                      f"qty={half_qty}  exit={ref_ltp:.1f}  "
                      f"Partial P&L={'+'if t1_pnl>=0 else ''}{t1_pnl:,.0f}  "
-                     f"Remaining→TRAILING")
+                     f"Remaining->TRAILING")
                 if not t.get("paper_mode", PAPER_MODE):
                     tok = _lookup_token(t.get("exchange", "BSE"), t["symbol"])
                     _place_live_order(t["symbol"], half_qty, "SELL",
@@ -377,7 +380,7 @@ def update_trail_sl(df5_live: "pd.DataFrame") -> None:
                                         t["trail_sl"]        = zone_low
                                         watched["triggered"] = True
                                         _log(f"TRAIL SL MOVED [{t['id']}] "
-                                             f"{old_sl:.1f} → {zone_low:.1f}")
+                                             f"{old_sl:.1f} -> {zone_low:.1f}")
                                     break
                             break
 
