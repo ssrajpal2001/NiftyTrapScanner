@@ -218,10 +218,11 @@ def option_daily_atr(df1: pd.DataFrame, htf_min: int, lookback: int = 10) -> flo
         if df_htf is None or df_htf.empty:
             return 0.0
         df_htf = df_htf.copy()
-        df_htf["_date"] = df_htf.index.date
+        # resample_tf returns reset_index() so datetime is a column, not index
+        dt_col = "datetime" if "datetime" in df_htf.columns else df_htf.columns[0]
+        df_htf["_date"] = pd.to_datetime(df_htf[dt_col]).dt.date
         daily = df_htf.groupby("_date").agg(h=("high", "max"), l=("low", "min"))
         daily["range"] = daily["h"] - daily["l"]
-        # Exclude today (partial day) — use only completed days
         today = date.today()
         completed = daily[daily.index < today]
         if completed.empty:
@@ -884,7 +885,13 @@ def live_ltf_scan(open_traps: list, df1: pd.DataFrame, ltf_min: int,
             htf_ref_bar=htf_ref_lbl, htf_trap_bar=htf_trap_lbl, htf_target=tgt,
         )
 
-        closed_ltf  = [e for e in ltf_entries if e["status"] == "CLOSED"]
+        _today_date = date.today()
+        # Only today's LTF entries are valid — a closed_on from a previous day
+        # means the signal already fired yesterday; don't re-trigger it today.
+        closed_ltf  = [e for e in ltf_entries
+                       if e["status"] == "CLOSED"
+                       and e.get("closed_on")
+                       and pd.Timestamp(e["closed_on"]).date() == _today_date]
         trapped_ltf = [e for e in ltf_entries if e["status"] == "TRAPPED"]
 
         if closed_ltf:
@@ -2415,16 +2422,21 @@ def main():
                     #   (b) zone exists but zone_high is too far from option's last close
                     # Any TRAPPED zone within lookback window counts — not just today's.
                     # A zone trapped last week that hasn't closed yet is still tradeable.
-                    today_traps   = [e for e in open_traps if e.get("trapped_on")]
+                    _cur_ltp_check = ws_feed.get_ltp(key) or prev_c
+                    # Only consider zones where zone price is within 60% of current LTP
+                    # — filters out stale deep-history zones (e.g. Jun 12 zones at 30-100
+                    #   when current option LTP is 540, which are never reachable today)
+                    _ltp_floor = _cur_ltp_check * 0.4 if _cur_ltp_check else 0
+                    today_traps   = [e for e in open_traps
+                                     if e.get("trapped_on")
+                                     and e.get("zone_trigger", e.get("zone_high", 0)) >= _ltp_floor]
                     has_fresh_75m = bool(today_traps)
 
                     zone_too_far   = False
                     _daily_atr     = option_daily_atr(df1, htf_min) if df1 is not None else 0.0
                     _zone_far_threshold = _daily_atr * zone_far_mult if _daily_atr > 0 else None
                     if has_fresh_75m and _zone_far_threshold:
-                        # Use current LTP (from WS) vs zone entry level (zone_trigger).
-                        # prev_c was wrong — zone may have been set long before today.
-                        _cur_ltp = ws_feed.get_ltp(key) or prev_c
+                        _cur_ltp = _cur_ltp_check
                         zone_too_far = all(
                             _cur_ltp - e.get("zone_trigger", e.get("zone_high", 0)) > _zone_far_threshold
                             for e in today_traps
