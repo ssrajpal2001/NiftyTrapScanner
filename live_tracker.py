@@ -988,7 +988,7 @@ def live_ltf_scan(open_traps: list, df1: pd.DataFrame, ltf_min: int,
                             qty            = qty * lot_size,
                             sl_price       = setup["sl"],
                             target_price   = setup["target"],
-                            tracked_sym    = _live_sym,
+                            tracked_sym    = upstox_key,   # scan strike Upstox key for SL/T1 monitoring
                             signal_src     = f"5-min retest zone {setup['ltf_zone_low']:.0f}->{setup['ltf_zone_high']:.0f}",
                             lots           = qty,
                             lot_size       = lot_size,
@@ -997,7 +997,7 @@ def live_ltf_scan(open_traps: list, df1: pd.DataFrame, ltf_min: int,
                             index_name     = index_name,
                             product_type   = st.session_state.get("angel_product_type", "CARRYFORWARD"),
                             paper_override = not _is_live,
-                            live_key       = _live_key,
+                            live_key       = _live_key,    # exec strike key (1-ITM or same as scan)
                         )
 
         elif trapped_ltf:
@@ -1154,7 +1154,7 @@ def live_intraday_scan(open_traps_15m: list, df1: pd.DataFrame,
                             qty            = qty * lot_size,
                             sl_price       = setup["sl"],
                             target_price   = setup["target"],
-                            tracked_sym    = sym,
+                            tracked_sym    = upstox_key,   # Upstox key for SL/T1 monitoring
                             signal_src     = f"15m→5m cascade zone {e5_zl:.0f}→{e5_zh:.0f}",
                             lots           = qty,
                             lot_size       = lot_size,
