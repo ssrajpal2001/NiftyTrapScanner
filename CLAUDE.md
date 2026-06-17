@@ -249,13 +249,55 @@ streamlit run live_tracker.py
 
 ---
 
-## 16. Pending Work
+## 16. Bugs Fixed (Jun 17 2026 live session) — CRITICAL for integration
+
+These were discovered during live Sensex trading. Any integration of this logic MUST apply these fixes:
+
+### A. tracked_sym must be Upstox instrument key, not Angel One symbol
+`log_entry(tracked_sym=...)` must receive the **Upstox BSE_FO|numeric_token** key, NOT the Angel One trading symbol (e.g. `SENSEX18JUN2676600CE`). `ws_feed.get_ltp()` only knows Upstox keys — passing the AO symbol gives LTP=0, breaking all SL/T1 monitoring.
+
+### B. 1-ITM strike = spot ATM ± 1 step (not pivot ± 1 step)
+When 1-ITM is enabled, compute from **current live spot LTP**:
+```python
+atm = round(spot_ltp / strike_step) * strike_step
+exec_strike = atm - strike_step  # CE: 1 step ITM below ATM
+exec_strike = atm + strike_step  # PE: 1 step ITM above ATM
+```
+Previous incorrect behaviour: `exec_strike = pivot_strike - step` → put orders 600+ pts ITM.
+
+### C. LTF CLOSED entries must be today's date only
+In `live_ltf_scan`, filter `closed_ltf` to entries where `closed_on.date() == today`. Without this filter, a June 16 LTF entry (e.g. entry=58.85 when CE was at ₹58) reappears as a live buy signal on June 17 when CE is at ₹540.
+
+### D. option_daily_atr() was always returning 0
+`resample_tf()` returns `reset_index()` — datetime is a **column** named `"datetime"`, not the index. Reading `df.index.date` gives RangeIndex dates, producing 0 ATR. Fix:
+```python
+df_htf["_date"] = pd.to_datetime(df_htf["datetime"]).dt.date
+```
+ATR=0 made `_zone_far_threshold=0` (falsy) → zone_too_far check never ran → cascade never triggered.
+
+### E. Stale deep-history zones block cascade
+Old HTF zones from weeks ago (e.g. CE at ₹30–100 when current LTP is ₹540) kept `has_fresh_75m=True`, preventing cascade even when today's zones were unreachable. Fix: filter `today_traps` to zones where `zone_trigger >= current_ltp * 0.4`.
+
+### F. In-memory stale trades persist across day boundary
+`_open_trades` in `angel_orders.py` is in-memory. On a new trading day without app restart, previous day's trades remain. Fix: `get_open_trades()` now auto-purges entries where `entry_time.date() != today`.
+
+### G. SQ OFF time for Sensex is 15:25, NOT 14:00
+Sensex (BSE) closes at 15:30. SQ OFF must be 15:25. The old value of 14:00 in `entry_cutoff` was cutting off trades 1.75 hours early.
+
+### H. Simulation vs real orders — two separate sections
+`"Today's Phase 3 Trades"` = scenario C backtest simulation on today's bars. NOT real orders.
+`"Angel One Trades"` = real broker orders only. Never confuse the two.
+
+---
+
+## 17. Pending Work
 
 - [ ] **Hetzner server setup** — CX22, curl setup script, fill .env, start service
 - [ ] **Regenerate Angel One credentials** — API key + TOTP secret were shared in chat; must regenerate before live trading
 - [ ] **CrudeOil live trading** — currently paper only; enable after Sensex is stable
 - [ ] **Nifty live trading** — currently paper only
 - [ ] **Auto Upstox token refresh** — currently manual daily
-- [ ] **SQ OFF auto-trigger** — `square_off_all()` exists but not wired to a scheduled call at 14:00 / 23:00
+- [ ] **SQ OFF auto-trigger** — `square_off_all()` exists but not wired to scheduled call at 15:25 Sensex / 23:00 MCX
 - [ ] **Angel One order cancel helper** — `cancelOrder` returns empty body (success) but SmartAPI lib throws JSON parse error; handle gracefully
 - [ ] **Test Nifty symbol format** — confirmed Sensex BFO works; Nifty NFO not yet tested live
+- [ ] **Entry cutoff in live_ltf_scan** — check `entry_cutoff` time before firing (currently only checked in time-window gate, not for SENSEX 15:20)
