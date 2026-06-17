@@ -905,13 +905,15 @@ def live_ltf_scan(open_traps: list, df1: pd.DataFrame, ltf_min: int,
                     continue  # not in any active entry window — wait
 
             # ── 1-ITM strike adjustment ────────────────────────────────────────
+            # 1-ITM = 1 strike step ITM from current spot ATM (not from pivot strike)
             _use_1itm   = st.session_state.get("use_1itm", False)
             live_strike = strike
-            if _use_1itm and strike:
+            if _use_1itm and spot_ltp and spot_ltp > 0 and strike_step:
+                _atm = round_n(spot_ltp, strike_step)
                 if opt_type == "CE":
-                    live_strike = strike - strike_step
+                    live_strike = _atm - strike_step   # 1 step ITM below spot
                 elif opt_type == "PE":
-                    live_strike = strike + strike_step
+                    live_strike = _atm + strike_step   # 1 step ITM above spot
 
             # Derive 1-ITM Upstox key and subscribe WS so P&L tracks the actual order strike
             _live_key = upstox_key   # default: same as scan strike
@@ -1842,21 +1844,31 @@ def _live_panel():
             pnl_col  = "🟢" if live_pnl >= 0 else "🔴"
 
             if t["trailing_mode"]:
-                sl_display = f"Trail SL: **{t['trail_sl']:.1f}** 🔁 ({len(t['trail_zones'])} zones watched)"
-                status_tag = "TRAILING 50%"
+                sl_display = f"Trail SL: **{t['trail_sl']:.1f}** (trailing, {len(t['trail_zones'])} zones)"
+                status_tag = "TRAILING — 50% booked"
             else:
-                sl_display = f"SL: **{t['sl']:.1f}**  T1: **{t['target']:.1f}**"
-                status_tag = "ACTIVE (full qty)"
+                sl_display = f"SL: **{t['sl']:.1f}**  |  T1: **{t['target']:.1f}**"
+                status_tag = "ACTIVE — full qty"
 
-            lots_rem = t["qty_remaining"] // t.get("lot_size", 20)
+            lots_rem     = t["qty_remaining"] // t.get("lot_size", 20)
+            scan_sym     = t.get("tracked_sym", "—")
+            exec_sym     = t.get("live_key", scan_sym)
+            spot_entry   = t.get("spot_at_entry", 0)
+            entry_time   = t.get("entry_time", "")
+            entry_hm     = pd.Timestamp(entry_time).strftime("%H:%M") if entry_time else "—"
+            mode_tag     = "PAPER" if t.get("paper_mode") else "LIVE"
+            tracking_ltp = ws_feed.get_ltp(scan_sym) or cur_ltp
+
             st.info(
-                f"**{t['side']} {t['strike']}** (1-ITM) — {status_tag}\n\n"
-                f"Lots: **{lots_rem}**  ×  Lot size: **{t.get('lot_size', 20)}**  =  **{t['qty_remaining']} units**  |  "
-                f"Entry LTP: **{ep:.1f}**  |  "
-                f"Current LTP: **{cur_ltp:.1f}**  |  "
+                f"**{t['side']} {t['strike']}** — {status_tag} ({mode_tag})\n\n"
+                f"Entry @ **{entry_hm}**  |  Spot at entry: **{spot_entry:.0f}**  |  "
+                f"Lots: **{lots_rem}** × {t.get('lot_size',20)} = **{t['qty_remaining']} units**\n\n"
+                f"Entry LTP: **{ep:.1f}**  |  Current LTP: **{cur_ltp:.1f}**  |  "
                 f"{sl_display}\n\n"
-                f"{pnl_col} Live P&L: **{pnl_sign}₹{live_pnl:,.0f}**  |  "
-                f"Source: {t['signal_src']}"
+                f"Scan/SL key: `{scan_sym}`  |  Tracking LTP: **{tracking_ltp:.1f}**"
+                + (f"  |  Exec key: `{exec_sym}`" if exec_sym != scan_sym else "") + "\n\n"
+                f"Signal: **{t.get('signal_src','—')}**  |  "
+                f"{pnl_col} Live P&L: **{pnl_sign}₹{live_pnl:,.0f}**"
             )
 
     if closed_pt:
