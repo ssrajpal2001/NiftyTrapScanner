@@ -414,7 +414,15 @@ def square_off_all(current_prices: dict[str, float]) -> None:
 
 # ── Public getters ──────────────────────────────────────────────────────────────
 def get_open_trades() -> list[dict]:
+    global _open_trades, _closed_trades
+    today = str(date.today())
     with _lock:
+        stale = [t for t in _open_trades
+                 if not str(t.get("entry_time", "")).startswith(today)]
+        if stale:
+            _log(f"DAY BOUNDARY: purging {len(stale)} stale open trade(s) from previous day")
+            _open_trades = [t for t in _open_trades
+                            if str(t.get("entry_time", "")).startswith(today)]
         return list(_open_trades)
 
 def get_closed_trades() -> list[dict]:

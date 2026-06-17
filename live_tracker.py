@@ -1889,9 +1889,18 @@ def _live_panel():
         if _p3_all_frag:
             sec("📅 Today's Phase 3 Trades — All Signals")
 
-            # Split into open (no exit_time) and closed
-            _p3_open   = [t for t in _p3_all_frag if not t.get("exit_time")]
-            _p3_closed = [t for t in _p3_all_frag if t.get("exit_time")]
+            # Split into open (no exit_time) and closed — only today's entries
+            _today_date_frag = date.today()
+            def _is_today(t):
+                et = t.get("entry_time")
+                if not et:
+                    return False
+                try:
+                    return pd.Timestamp(et).date() == _today_date_frag
+                except Exception:
+                    return False
+            _p3_open   = [t for t in _p3_all_frag if not t.get("exit_time") and _is_today(t)]
+            _p3_closed = [t for t in _p3_all_frag if t.get("exit_time") and _is_today(t)]
 
             # Open positions first
             if _p3_open:
