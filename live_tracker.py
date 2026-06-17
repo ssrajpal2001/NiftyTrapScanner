@@ -2640,9 +2640,33 @@ def main():
                                 f"T1✓ {n_t1}  SL✗ {n_sl}  |  "
                                 f"Net P&L: {pnl_header}"
                             ) if _sim_trades else f"📊 {label} — Today: No signals"
-                            with st.expander(exp_label, expanded=bool(_sim_trades)):
+                            with st.expander(exp_label, expanded=True):
                                 if not _sim_trades:
-                                    st.caption("No closed zones today — no simulated entries.")
+                                    _cur_ltp_disp = ws_feed.get_ltp(key) or prev_c
+                                    st.caption(f"No closed LTF entry today — watching zones below. Current LTP: **{_cur_ltp_disp:.1f}**")
+                                    # Show all open HTF zones being tracked
+                                    _zones_to_show = open_traps_15m if intraday_mode else open_traps
+                                    _zone_label    = "15-min" if intraday_mode else "75-min"
+                                    if _zones_to_show:
+                                        _zone_rows = []
+                                        for _z in _zones_to_show:
+                                            _trap_dt = pd.Timestamp(_z["trapped_on"]).strftime("%d %b %H:%M") if _z.get("trapped_on") else "—"
+                                            _ref_dt  = pd.Timestamp(_z["ref_ts"]).strftime("%d %b %H:%M") if _z.get("ref_ts") else "—"
+                                            _ztrig   = _z.get("zone_trigger", _z.get("zone_high", 0))
+                                            _dist    = round(_cur_ltp_disp - _ztrig, 1) if _ztrig else "?"
+                                            _zone_rows.append({
+                                                "TF"         : _zone_label,
+                                                "Ref bar"    : _ref_dt,
+                                                "Trapped on" : _trap_dt,
+                                                "Zone H"     : round(_z.get("zone_high", 0), 1),
+                                                "Zone L"     : round(_z.get("zone_low",  0), 1),
+                                                "Entry"      : round(_ztrig, 1),
+                                                "SL"         : round(_z.get("sl", 0), 1),
+                                                "LTP dist"   : _dist,
+                                            })
+                                        st.dataframe(_zone_rows, use_container_width=True)
+                                    else:
+                                        st.caption("No open zones found.")
                                 else:
                                     st.markdown(
                                         f'<div style="font-size:13px; font-weight:bold; '
