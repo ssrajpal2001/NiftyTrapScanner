@@ -434,6 +434,79 @@ def get_session_pnl() -> float:
         return sum(t["pnl"] or 0 for t in _closed_trades)
 
 
+def get_broker_positions() -> list[dict]:
+    """Fetch open positions from Angel One. Returns list of {symbol, netqty, ltp}."""
+    if PAPER_MODE or _session_obj is None:
+        return []
+    try:
+        resp = _session_obj.position()
+        if resp and resp.get("status") and resp.get("data"):
+            return resp["data"]
+    except Exception as ex:
+        _log(f"get_broker_positions error: {ex}")
+    return []
+
+
+def sync_with_broker() -> list[str]:
+    """
+    Compare open trades against broker positions.
+    Any trade whose symbol has netqty=0 at broker is auto-closed as MANUAL_CLOSE.
+    Returns list of symbols that were auto-closed.
+    """
+    global _open_trades, _closed_trades
+    broker_pos = get_broker_positions()
+    # Build map: symbol → net qty
+    net_qty_map: dict[str, int] = {}
+    for p in broker_pos:
+        sym = p.get("tradingsymbol") or p.get("symbolname") or ""
+        try:
+            net_qty_map[sym] = int(p.get("netqty", 0))
+        except Exception:
+            net_qty_map[sym] = 0
+
+    closed_syms = []
+    with _lock:
+        still_open = []
+        for t in _open_trades:
+            broker_sym = t.get("symbol", "")
+            net_qty    = net_qty_map.get(broker_sym)
+            # If broker has the symbol with netqty=0, or symbol absent entirely → manually closed
+            if net_qty is not None and net_qty == 0:
+                t["status"]      = "CLOSED"
+                t["exit_time"]   = datetime.now().isoformat()
+                t["exit_px"]     = 0
+                t["exit_reason"] = "MANUAL_CLOSE (broker=0)"
+                t["pnl"]         = 0
+                _closed_trades.append(t)
+                closed_syms.append(broker_sym)
+                _log(f"AUTO-CLOSED {broker_sym}: broker netqty=0, removing from tracking")
+            else:
+                still_open.append(t)
+        _open_trades = still_open
+    if closed_syms:
+        _save_state()
+    return closed_syms
+
+
+def manual_close_trade(trade_id: str, exit_px: float = 0) -> bool:
+    """Mark a tracked trade as manually closed (no broker call — just clears tracking)."""
+    global _open_trades, _closed_trades
+    with _lock:
+        for t in list(_open_trades):
+            if t.get("id") == trade_id:
+                t["status"]      = "CLOSED"
+                t["exit_time"]   = datetime.now().isoformat()
+                t["exit_px"]     = exit_px
+                t["exit_reason"] = "MANUAL_CLOSE"
+                t["pnl"]         = round((exit_px - (t.get("entry_px") or 0)) * t.get("qty_remaining", 0), 2)
+                _closed_trades.append(t)
+                _open_trades.remove(t)
+                _log(f"MANUAL CLOSE: {t['symbol']} id={trade_id} exit_px={exit_px}")
+                _save_state()
+                return True
+    return False
+
+
 # ── Live order placement ────────────────────────────────────────────────────────
 def _place_live_order(symbol: str, qty: int, side: str,
                       exchange: str = "BSE", sym_token: str = "",

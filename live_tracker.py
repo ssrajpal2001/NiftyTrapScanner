@@ -1832,6 +1832,13 @@ def _live_panel():
     pc3.metric("Session P&L",     f"{sign}₹{pnl_total:,.0f}",
                delta=f"{sign}{pnl_total:,.0f}")
 
+    # Auto-sync with broker: close any trade the broker no longer holds
+    if not angel_orders.PAPER_MODE:
+        _auto_closed = angel_orders.sync_with_broker()
+        if _auto_closed:
+            st.warning(f"Auto-closed (broker netqty=0): {', '.join(_auto_closed)}")
+            open_pt = angel_orders.get_open_trades()
+
     if open_pt:
         st.markdown("**Open Positions:**")
         for t in open_pt:
@@ -1859,17 +1866,24 @@ def _live_panel():
             mode_tag     = "PAPER" if t.get("paper_mode") else "LIVE"
             tracking_ltp = ws_feed.get_ltp(scan_sym) or cur_ltp
 
-            st.info(
-                f"**{t['side']} {t['strike']}** — {status_tag} ({mode_tag})\n\n"
-                f"Entry @ **{entry_hm}**  |  Spot at entry: **{spot_entry:.0f}**  |  "
-                f"Lots: **{lots_rem}** × {t.get('lot_size',20)} = **{t['qty_remaining']} units**\n\n"
-                f"Entry LTP: **{ep:.1f}**  |  Current LTP: **{cur_ltp:.1f}**  |  "
-                f"{sl_display}\n\n"
-                f"Scan/SL key: `{scan_sym}`  |  Tracking LTP: **{tracking_ltp:.1f}**"
-                + (f"  |  Exec key: `{exec_sym}`" if exec_sym != scan_sym else "") + "\n\n"
-                f"Signal: **{t.get('signal_src','—')}**  |  "
-                f"{pnl_col} Live P&L: **{pnl_sign}₹{live_pnl:,.0f}**"
-            )
+            _tid = t.get("id", "")
+            _col_info, _col_btn = st.columns([5, 1])
+            with _col_info:
+                st.info(
+                    f"**{t['side']} {t['strike']}** — {status_tag} ({mode_tag})\n\n"
+                    f"Entry @ **{entry_hm}**  |  Spot at entry: **{spot_entry:.0f}**  |  "
+                    f"Lots: **{lots_rem}** × {t.get('lot_size',20)} = **{t['qty_remaining']} units**\n\n"
+                    f"Entry LTP: **{ep:.1f}**  |  Current LTP: **{cur_ltp:.1f}**  |  "
+                    f"{sl_display}\n\n"
+                    f"Scan/SL key: `{scan_sym}`  |  Tracking LTP: **{tracking_ltp:.1f}**"
+                    + (f"  |  Exec key: `{exec_sym}`" if exec_sym != scan_sym else "") + "\n\n"
+                    f"Signal: **{t.get('signal_src','—')}**  |  "
+                    f"{pnl_col} Live P&L: **{pnl_sign}₹{live_pnl:,.0f}**"
+                )
+            with _col_btn:
+                if st.button("❌ Mark\nClosed", key=f"mclose_{_tid}", help="Mark this position as manually closed at broker"):
+                    angel_orders.manual_close_trade(_tid, exit_px=cur_ltp)
+                    st.rerun()
 
     if closed_pt:
         rows = []
