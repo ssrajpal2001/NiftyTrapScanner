@@ -39,6 +39,13 @@ _loop:     asyncio.AbstractEventLoop | None = None
 _thread:   threading.Thread | None = None
 _ws_obj    = None   # live websocket handle (set inside _ws_connect)
 
+# Optional callback fired on every tick: fn(key: str, ltp: float)
+_tick_callback = None
+
+def set_tick_callback(fn) -> None:
+    global _tick_callback
+    _tick_callback = fn
+
 WS_AUTH_URL = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
 
 
@@ -309,6 +316,11 @@ def _process_tick(raw: bytes) -> None:
             if ltp:
                 _ltp[key] = ltp
                 _update_candle(key, now, ltp)
+                if _tick_callback:
+                    try:
+                        _tick_callback(key, ltp)
+                    except Exception:
+                        pass
             if cp and cp > 0 and key not in _prev_close:
                 _prev_close[key] = cp
 

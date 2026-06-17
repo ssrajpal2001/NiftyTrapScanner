@@ -960,12 +960,13 @@ def live_ltf_scan(open_traps: list, df1: pd.DataFrame, ltf_min: int,
                     _spread_ok   = True
                     _spread_info = ""
                     if _is_live and _live_key and upstox_token:
+                        _max_sp = st.session_state.get("max_spread_pct", MAX_SPREAD_PCT)
                         _spread_ok, _spct, _bid, _ask = check_bid_ask_spread(
-                            _live_key, upstox_token
+                            _live_key, upstox_token, max_pct=_max_sp
                         )
                         if not _spread_ok:
                             _spread_info = (f"Bid:{_bid} Ask:{_ask} "
-                                            f"Spread:{_spct:.1f}% > {MAX_SPREAD_PCT}%")
+                                            f"Spread:{_spct:.1f}% > {_max_sp}%")
                             log_event(log_path, "SKIPPED_WIDE_SPREAD",
                                       f"{_live_sym} {_spread_info}")
                             angel_orders._log(
@@ -1125,12 +1126,13 @@ def live_intraday_scan(open_traps_15m: list, df1: pd.DataFrame,
                     _spread_ok   = True
                     _spread_info = ""
                     if _is_live and upstox_key and upstox_token:
+                        _max_sp = st.session_state.get("max_spread_pct", MAX_SPREAD_PCT)
                         _spread_ok, _spct, _bid, _ask = check_bid_ask_spread(
-                            upstox_key, upstox_token
+                            upstox_key, upstox_token, max_pct=_max_sp
                         )
                         if not _spread_ok:
                             _spread_info = (f"Bid:{_bid} Ask:{_ask} "
-                                            f"Spread:{_spct:.1f}% > {MAX_SPREAD_PCT}%")
+                                            f"Spread:{_spct:.1f}% > {_max_sp}%")
                             log_event(log_path, "SKIPPED_WIDE_SPREAD",
                                       f"{sym} {_spread_info}")
                             angel_orders._log(
@@ -1582,12 +1584,13 @@ def _dashboard_table(contracts: list, ltf_results: dict) -> str:
 
 
 # ─── Live fragment (reruns every 2 s) ──────────────────────────────────────────
-@st.fragment(run_every=2)
+@st.fragment(run_every=30)
 def _live_panel():
     contracts = st.session_state.get("_contracts", [])
     idx_pairs = st.session_state.get("_idx_pairs", [])
     settings  = st.session_state.get("_settings", {})
     log_path  = st.session_state.get("_log_path", LOG_DIR / "live.txt")
+    token     = _get_token()
 
     if not contracts:
         st.info("Initializing... wait a moment or click Force Refresh.")
@@ -1738,22 +1741,8 @@ def _live_panel():
         else:
             ltf_results[sym] = ([], [])
 
-    # ── Paper trade exit checks (SL / T1 partial / trail SL) ─────────────────
-    if angel_orders.get_open_trades():
-        _tracked_prices = {}
-        for meta in contracts:
-            sym = meta["sym"]
-            ltp = ws_feed.get_ltp(meta["key"])
-            if ltp:
-                _tracked_prices[sym] = ltp
-        # For 1-ITM trades: override with the actual order strike's LTP
-        for _t in angel_orders.get_open_trades():
-            _lk = _t.get("live_key", "")
-            if _lk:
-                _itm_ltp = ws_feed.get_ltp(_lk)
-                if _itm_ltp:
-                    _tracked_prices[_t["tracked_sym"]] = _itm_ltp
-        angel_orders.check_exits(_tracked_prices)
+    # SL / T1 exits are now handled tick-by-tick in the WS callback (_on_tick)
+    # Only trail SL update needs bar data — still done here on fragment cadence
 
         # Update trailing SL using live 5-min bars of each open trade's tracked sym
         for t in angel_orders.get_open_trades():
@@ -2118,10 +2107,9 @@ def main():
         _all_scripts = ["Nifty", "Sensex", "CrudeOil"]
         _live_scripts: set[str] = set()
         for _sc in _all_scripts:
-            _default_live = not angel_orders.PAPER_MODE  # match global default
             _sc_live = st.checkbox(
-                f"🔴 LIVE — {_sc}" if _default_live else f"🟡 PAPER — {_sc}",
-                value=_default_live,
+                f"🔴 LIVE — {_sc}",
+                value=False,
                 key=f"live_mode_{_sc}",
                 help=f"Tick = LIVE orders on Angel One for {_sc}. Untick = paper/simulation only.",
             )
@@ -2139,9 +2127,9 @@ def main():
         sl_buffer         = st.number_input("SL Buffer (pts)", value=DEFAULT_SL_BUFFER, step=0.5)
         zone_far_mult     = st.number_input(
             "Zone Far ATR multiplier",
-            value=1.0, step=0.1, min_value=0.3, max_value=3.0,
-            help="Cascade fires if zone_high − last_close > X × option's avg daily range. "
-                 "1.0 = zone must be within today's expected move to count as reachable."
+            value=1.5, step=0.1, min_value=0.3, max_value=3.0,
+            help="Cascade fires if current LTP − zone entry > X × option ATR. "
+                 "Backtest: 1.5x optimal. Lower = cascade more aggressively."
         )
         gap_nifty  = st.number_input("Nifty gap %",  value=1.0, step=0.1,
                                      min_value=0.5, max_value=5.0, key="gap_nifty")
@@ -2154,7 +2142,7 @@ def main():
             help="If (ask−bid)/mid > this %, order is SKIPPED and reason is logged. "
                  "Set higher for illiquid scripts (e.g. 8–10%) or lower for liquid ones.",
         )
-        import live_tracker as _self_mod; _self_mod.MAX_SPREAD_PCT = _max_spread_pct
+        st.session_state["max_spread_pct"] = _max_spread_pct
         sl_dir          = st.toggle("Phase 3 SL Direction Filter", value=True)
         spot_dir_filter = st.checkbox("📍 Spot Direction Filter (15-5 min)",
                                       value=True,
@@ -2390,20 +2378,22 @@ def main():
                     # Cascade fires when:
                     #   (a) no fresh 75-min zone trapped TODAY, OR
                     #   (b) zone exists but zone_high is too far from option's last close
-                    today_date    = date.today()
-                    today_traps   = [e for e in open_traps
-                                     if e.get("trapped_on") and
-                                     pd.Timestamp(e["trapped_on"]).date() == today_date]
+                    # Any TRAPPED zone within lookback window counts — not just today's.
+                    # A zone trapped last week that hasn't closed yet is still tradeable.
+                    today_traps   = [e for e in open_traps if e.get("trapped_on")]
                     has_fresh_75m = bool(today_traps)
 
                     zone_too_far   = False
                     _daily_atr     = option_daily_atr(df1, htf_min) if df1 is not None else 0.0
                     _zone_far_threshold = _daily_atr * zone_far_mult if _daily_atr > 0 else None
-                    if has_fresh_75m and prev_c > 0 and _zone_far_threshold:
-                        # Zone too far = ALL today's zones are beyond option's ATR-based reach
+                    if has_fresh_75m and _zone_far_threshold:
+                        # Use current LTP (from WS) vs zone entry level (zone_trigger).
+                        # prev_c was wrong — zone may have been set long before today.
+                        _cur_ltp = ws_feed.get_ltp(key) or prev_c
                         zone_too_far = all(
-                            e.get("zone_high", 0) - prev_c > _zone_far_threshold
+                            _cur_ltp - e.get("zone_trigger", e.get("zone_high", 0)) > _zone_far_threshold
                             for e in today_traps
+                            if e.get("zone_trigger", e.get("zone_high", 0)) > 0
                         )
 
                     _cascade_reason = ""
@@ -2411,8 +2401,13 @@ def main():
                         _cascade_reason = "Gap day, no 75-min zone" if gap_fired else "No 75-min zone today"
                     elif zone_too_far:
                         _atr_str = f"{_daily_atr:.1f}" if _daily_atr else "?"
-                        _cascade_reason = (f"Zone too far — gap {today_traps[0].get('zone_high',0)-prev_c:.0f} pts "
-                                           f"> {zone_far_mult:.1f}×ATR({_atr_str})")
+                        _cur_ltp = ws_feed.get_ltp(key) or prev_c
+                        _nearest_z = min(today_traps,
+                                         key=lambda e: abs(e.get("zone_trigger", e.get("zone_high",0)) - _cur_ltp),
+                                         default={})
+                        _gap = _cur_ltp - _nearest_z.get("zone_trigger", _nearest_z.get("zone_high", 0))
+                        _cascade_reason = (f"Zone too far — LTP {_cur_ltp:.0f} vs zone {_nearest_z.get('zone_trigger',0):.0f} "
+                                           f"gap {_gap:.0f} > {zone_far_mult:.1f}x ATR({_atr_str})")
 
                     intraday_mode = not has_fresh_75m or zone_too_far
                     open_traps_15m = []
@@ -2699,6 +2694,24 @@ def main():
                 ws_feed.add_keys(ws_keys, hist_map)
             else:
                 ws_feed.start(token, ws_keys, hist_map)
+
+            # Register tick-level SL check — fires on every WS tick, not on UI refresh
+            def _on_tick(key: str, ltp: float) -> None:
+                open_t = angel_orders.get_open_trades()
+                if not open_t:
+                    return
+                prices = {t["tracked_sym"]: ws_feed.get_ltp(t["tracked_sym"]) or ltp
+                          for t in open_t}
+                # prefer live_key LTP for 1-ITM trades
+                for t in open_t:
+                    lk = t.get("live_key", "")
+                    if lk:
+                        v = ws_feed.get_ltp(lk)
+                        if v:
+                            prices[t["tracked_sym"]] = v
+                angel_orders.check_exits(prices)
+            ws_feed.set_tick_callback(_on_tick)
+
             st.session_state["_ws_keys"] = existing_ws_keys + ws_keys
 
         # Append new contracts to existing ones — never wipe old scripts
@@ -2735,6 +2748,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
-else:
     main()

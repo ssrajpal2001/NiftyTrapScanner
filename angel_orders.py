@@ -1,4 +1,4 @@
-﻿"""
+"""
 angel_orders.py - Angel One SmartAPI integration.
 
 PAPER_MODE = True  ->  logs orders, zero real API calls, P&L tracked from WS prices.
@@ -231,9 +231,11 @@ def log_entry(
     }
 
     with _lock:
-        already = [t for t in _open_trades if t["side"] == side and t["status"] == "OPEN"]
+        # Block any new entry for this index while ANY trade (CE or PE) is still open
+        already = [t for t in _open_trades
+                   if t.get("index_name") == index_name and t["status"] == "OPEN"]
         if already:
-            _log(f"SKIP duplicate: {side} trade already open ({already[0]['symbol']})")
+            _log(f"SKIP {side}: {already[0]['side']} trade already open for {index_name} ({already[0]['symbol']})")
             return None
         _open_trades.append(trade)
         _save_state()
