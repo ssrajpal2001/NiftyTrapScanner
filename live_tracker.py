@@ -1797,7 +1797,7 @@ def _live_panel():
     ]
 
     if active_pairs:
-        sec("Active Trades — Scenario C (Phase 3)")
+        sec("📊 Scenario C Simulation — Paper P&L only, NOT real broker orders")
         for pair in active_pairs:
             # Derive index name from pair label (e.g. "Sensex Pair 1 — S1/R1")
             pair_idx = next(
@@ -1920,7 +1920,7 @@ def _live_panel():
             _p3_all_frag = []
 
         if _p3_all_frag:
-            sec("📅 Today's Phase 3 Trades — All Signals")
+            sec("📊 Today's Simulation — What the algo would have traded (NOT real orders)")
 
             # Split into open (no exit_time) and closed — only today's entries
             _today_date_frag = date.today()
